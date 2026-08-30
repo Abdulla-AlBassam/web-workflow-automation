@@ -1,0 +1,175 @@
+{
+  "version": 1,
+  "name": "sijilat-cr-search",
+  "origin": "https://www.sijilat.bh",
+  "language": "EN",
+  "parameters": [
+    {
+      "name": "cr_name_en",
+      "example": "bank",
+      "required": true
+    }
+  ],
+  "steps": [
+    {
+      "id": "token",
+      "type": "browser-token",
+      "loadUrl": "https://www.sijilat.bh/public-search-cr/search-cr-2.aspx",
+      "readToken": "localStorage.accessToken",
+      "bearerPath": "access_token",
+      "reason": "direct call needs a bearer token (probe returned 401); the site issues one client-side for anonymous users"
+    },
+    {
+      "id": "search",
+      "type": "request",
+      "method": "POST",
+      "url": "https://api.sijilat.bh/api/CRdetails/AdvanceSearchCR_Paging",
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "accept": "*/*"
+      },
+      "bearerFrom": "token",
+      "bodyTemplate": {
+        "draw": 2,
+        "columns": [
+          {
+            "data": "CR_NO",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          },
+          {
+            "data": "CR_LNM",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          },
+          {
+            "data": "CR_ANM",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          },
+          {
+            "data": "CM_TYP_DESC",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          },
+          {
+            "data": "REG_DATE",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          },
+          {
+            "data": "EXPIRE_DATE",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          },
+          {
+            "data": "STATUS",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          },
+          {
+            "data": "ACTIVITIES",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          },
+          {
+            "data": "SECTOR",
+            "name": "",
+            "searchable": true,
+            "orderable": false,
+            "search": {
+              "value": "",
+              "regex": false
+            }
+          }
+        ],
+        "order": [],
+        "start": 0,
+        "length": 10,
+        "search": {
+          "value": "",
+          "regex": false
+        },
+        "CR_NO": "",
+        "CR_LNM": "{{cr_name_en}}",
+        "CR_ANM": "",
+        "CM_TYP_CD": "",
+        "STATUS": "",
+        "CR_MUNCP_CD": "",
+        "CR_BLOCK": "",
+        "CM_NAT_CD": "",
+        "FIRST_LEV": "",
+        "PTNER_LNM": "",
+        "PTNER_ANM": "",
+        "PTNER_NAT_CD": "",
+        "REG_DATE_FROM": "",
+        "REG_DATE_TO": "",
+        "CR_ROAD": "",
+        "CR_FLAT": "",
+        "CR_BULD": "",
+        "PSPORT_NO": "",
+        "PTNER_CR_NO": "",
+        "VCR_YN": "",
+        "ISIC4_CD": "",
+        "CurrentMenuType": "A",
+        "cpr_no": "",
+        "CULT_LANG": "EN",
+        "PaginationParams": {
+          "Page": 1,
+          "ItemPerPage": 10
+        }
+      }
+    }
+  ],
+  "outcome": {
+    "fromStep": "search",
+    "expect": {
+      "path": "Status_Code",
+      "equals": "200"
+    },
+    "extract": {
+      "records": "jsonData.CR_list",
+      "total": "jsonData.Total_Records"
+    }
+  }
+}

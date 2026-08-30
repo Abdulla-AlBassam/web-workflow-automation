@@ -11,8 +11,15 @@ Captured by direct inspection on 2026-08-29. Re-verify anything load-bearing bef
 
 ## API
 
-- Search fires AJAX to `endPoint + "CRdetails/AdvanceSearchCR_Paging"` where `endPoint = "https://api.sijilat.bh/api/"` (global, set in `/js/config.js`).
-- Request body shape, headers, and whether the API demands signing: unknown until we record a real session. `sha256.js` is loaded by the page — possible request signing. This is the main unknown for the direct-request path.
+- Search fires AJAX to `endPoint + "CRdetails/AdvanceSearchCR_Paging"` where `endPoint = "https://api.sijilat.bh/api/"` (global, set in `/js/config.js`). Method POST, `content-type: application/json`.
+- Request body is a DataTables server-side payload. The search term for an English-name lookup lands in the top-level `CR_LNM` field (Arabic name → `CR_ANM`, CR number → `CR_NO`). Language is carried as `CULT_LANG` (`"EN"`/`"AR"`), paging as `PaginationParams`. Recorded example banked at `fixtures/live-trace.sijilat.json` (search "bank" → 563 records).
+- Response: `{ Status_Code, Status_Message, jsonData: { Total_Records, CR_list: [ { CR_NO, CR_LNM, CR_ANM, CM_TYP_DESC, STATUS, ... } ] } }`.
+
+### Auth (resolves the sha256.js unknown)
+
+- The API requires `Authorization: Bearer <token>`. Body-only replay returns **401**. `sha256.js` is not request signing; it derives the token password.
+- The token is anonymous and public: the page runs `tokenRequest("sijilat_test")` (`/js/config.js`), which POSTs `endPoint + "/token"` with `grant_type=password`, `username=sijilat`, `password=HMAC-SHA256(key, "sijilat_test")` where `key` is a constant baked into the public JS. The token is cached in `localStorage.accessToken` with an `expirey_date`. Every anonymous visitor gets one automatically; it is not a user credential.
+- **Runner strategy:** do not reproduce the HMAC/password step. Load the origin page in Playwright, let the site mint its own token, read `localStorage.accessToken`, then make the one direct search call with that bearer. The runner never handles the password. This is the "one browser step first" the proposal anticipated.
 
 ## Noise to filter
 

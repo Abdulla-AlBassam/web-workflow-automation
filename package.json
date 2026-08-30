@@ -6,7 +6,11 @@
     "backend": "tsx backend/src/server.ts",
     "build:ext": "node extension/build.mjs",
     "fixture": "node fixtures/serve.mjs",
-    "e2e": "node e2e/record.e2e.mjs"
+    "record:live": "node tools/record-live.mjs",
+    "run": "tsx runner/src/cli.ts",
+    "e2e": "node e2e/record.e2e.mjs",
+    "test:failures": "node e2e/failure-paths.mjs",
+    "typecheck": "tsc -p extension/tsconfig.json && tsc -p backend/tsconfig.json && tsc -p runner/tsconfig.json"
   },
   "dependencies": {
     "fastify": "^5.0.0"

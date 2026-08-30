@@ -1,6 +1,9 @@
 import Fastify from 'fastify';
 import { appendEvents, createSession, getMeta, listSessions, readEvents, saveMeta, status } from './store.js';
 import { sanitise } from './redact.js';
+import { analyse } from './analyse.js';
+import { toSpec } from './generate.js';
+import { probeAuth } from './probe.js';
 
 const app = Fastify({ logger: { level: 'warn' } });
 
@@ -69,6 +72,34 @@ app.get('/api/sessions/:id/export', async (req, reply) => {
     integrity: { events: events.length, seqGaps: gaps, dropped: meta.dropped },
     events,
   };
+});
+
+function loadAnalysis(id: string) {
+  const meta = getMeta(id);
+  if (!meta) return undefined;
+  return analyse({ meta: { session: id, status: status(meta) }, events: readEvents(id) });
+}
+
+app.get('/api/sessions/:id/analysis', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const a = loadAnalysis(id);
+  if (!a) return reply.code(404).send({ error: 'unknown session' });
+  return a;
+});
+
+app.post('/api/sessions/:id/spec', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const a = loadAnalysis(id);
+  if (!a) return reply.code(404).send({ error: 'unknown session' });
+  const { name, origin, loadUrl, probe } = req.body as { name?: string; origin?: string; loadUrl?: string; probe?: boolean };
+  if (!name || !origin || !loadUrl) return reply.code(400).send({ error: 'name, origin and loadUrl required' });
+  // Probe is opt-in: it makes one unauthenticated call to the outcome endpoint.
+  const probeStatus = probe && a.outcome ? await probeAuth(a.outcome).catch(() => undefined) : undefined;
+  try {
+    return toSpec(a, { name, origin, loadUrl, probeStatus });
+  } catch (e) {
+    return reply.code(422).send({ error: (e as Error).message });
+  }
 });
 
 // Human-readable session list; tokens and rules in docs/ui.md.

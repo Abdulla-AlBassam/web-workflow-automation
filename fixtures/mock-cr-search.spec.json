@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "mock-cr-search",
+  "origin": "http://127.0.0.1:4980",
+  "language": "EN",
+  "parameters": [
+    {
+      "name": "cr_number",
+      "example": "139867",
+      "required": true
+    }
+  ],
+  "steps": [
+    {
+      "id": "search",
+      "type": "request",
+      "method": "POST",
+      "url": "http://127.0.0.1:4980/api/CRdetails/AdvanceSearchCR_Paging",
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "accept": "*/*"
+      },
+      "bodyTemplate": {
+        "CR_NO": "{{cr_number}}",
+        "PAGE": 1
+      }
+    }
+  ],
+  "outcome": {
+    "fromStep": "search",
+    "expect": {
+      "path": "__http_ok",
+      "equals": "true"
+    },
+    "extract": {
+      "records": "RECORDS"
+    }
+  }
+}
