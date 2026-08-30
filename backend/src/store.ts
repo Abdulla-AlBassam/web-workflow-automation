@@ -16,6 +16,16 @@ const DATA_DIR = process.env.DATA_DIR ?? join(import.meta.dirname, '../data');
 const dir = (session: string) => join(DATA_DIR, session);
 const metaPath = (session: string) => join(dir(session), 'meta.json');
 const eventsPath = (session: string) => join(dir(session), 'events.jsonl');
+const specPath = (session: string) => join(dir(session), 'spec.json');
+
+export function saveSpec(session: string, spec: unknown) {
+  writeFileSync(specPath(session), JSON.stringify(spec, null, 2));
+}
+
+export function getSpec(session: string): unknown | undefined {
+  if (!existsSync(specPath(session))) return undefined;
+  return JSON.parse(readFileSync(specPath(session), 'utf8'));
+}
 
 export function createSession(session: string, hosts: string[], startedAt: number): boolean {
   if (existsSync(dir(session))) return false;

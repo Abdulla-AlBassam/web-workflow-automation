@@ -1,9 +1,10 @@
 import Fastify from 'fastify';
-import { appendEvents, createSession, getMeta, listSessions, readEvents, saveMeta, status } from './store.js';
+import { appendEvents, createSession, getMeta, getSpec, listSessions, readEvents, saveMeta, saveSpec, status } from './store.js';
 import { sanitise } from './redact.js';
 import { analyse } from './analyse.js';
 import { toSpec } from './generate.js';
 import { probeAuth } from './probe.js';
+import { renderDetail, renderList } from './views.js';
 
 const app = Fastify({ logger: { level: 'warn' } });
 
@@ -96,48 +97,27 @@ app.post('/api/sessions/:id/spec', async (req, reply) => {
   // Probe is opt-in: it makes one unauthenticated call to the outcome endpoint.
   const probeStatus = probe && a.outcome ? await probeAuth(a.outcome).catch(() => undefined) : undefined;
   try {
-    return toSpec(a, { name, origin, loadUrl, probeStatus });
+    const spec = toSpec(a, { name, origin, loadUrl, probeStatus });
+    saveSpec(id, spec);
+    return spec;
   } catch (e) {
     return reply.code(422).send({ error: (e as Error).message });
   }
 });
 
-// Human-readable session list; tokens and rules in docs/ui.md.
 app.get('/', async (_req, reply) => {
-  const rows = listSessions().map((m) => {
-    const st = status(m);
-    return `<tr>
-      <td><a href="/api/sessions/${m.session}/export">${m.session}</a></td>
-      <td><span class="pill pill-${st}">${st}</span></td>
-      <td class="num">${m.count}</td>
-      <td class="num">${m.dropped}</td>
-      <td class="num">${new Date(m.startedAt).toLocaleString('en-GB')}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="5" class="empty">No sessions recorded yet.</td></tr>';
-
   reply.type('text/html');
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Recorder sessions</title><style>
-    :root { --bg:#F6F7F9; --surface:#fff; --border:#E3E6EA; --text:#1A202C; --muted:#5B6472; --accent:#2563EB; --rec:#D64545; --ok:#1B8A5A; }
-    * { box-sizing:border-box; margin:0; }
-    body { background:var(--bg); color:var(--text); font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; padding:24px; }
-    main { max-width:720px; margin:0 auto; background:var(--surface); border-radius:12px; padding:20px; box-shadow:0 0 0 1px rgb(20 24 32/.06),0 2px 6px rgb(20 24 32/.05); }
-    h1 { font-size:15px; font-weight:600; margin-bottom:12px; letter-spacing:-0.01em; }
-    table { width:100%; border-collapse:collapse; }
-    th { text-align:left; font-size:12px; font-weight:500; color:var(--muted); padding:6px 8px; border-bottom:1px solid var(--border); }
-    td { padding:8px; border-bottom:1px solid var(--border); }
-    tr:last-child td { border-bottom:none; }
-    td.num { font-variant-numeric:tabular-nums; }
-    a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
-    .pill { font-size:12px; padding:2px 8px; border-radius:999px; }
-    .pill-complete { background:#E7F3ED; color:var(--ok); }
-    .pill-recording { background:#FBEAEA; color:var(--rec); }
-    .pill-interrupted { background:#FDF3E3; color:#9A6700; }
-    .empty { color:var(--muted); text-align:center; padding:24px; }
-  </style></head><body><main>
-    <h1>Recorder sessions</h1>
-    <table><thead><tr><th>Session</th><th>Status</th><th>Events</th><th>Dropped</th><th>Started</th></tr></thead>
-    <tbody>${rows}</tbody></table>
-  </main></body></html>`;
+  return renderList(listSessions().map((m) => ({ ...m, st: status(m) })));
+});
+
+app.get('/session/:id', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const meta = getMeta(id);
+  if (!meta) return reply.code(404).type('text/html').send('<p>unknown session — <a href="/">back</a></p>');
+  const events = readEvents(id);
+  const a = analyse({ meta: { session: id, status: status(meta) }, events });
+  reply.type('text/html');
+  return renderDetail(meta, status(meta), a, events, getSpec(id));
 });
 
 const port = Number(process.env.PORT ?? 4823);
