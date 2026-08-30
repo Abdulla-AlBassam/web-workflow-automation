@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mock Sijilat — CR Search</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+    label { display: block; margin: 12px 0 4px; }
+    input { padding: 6px 8px; width: 240px; }
+    button { padding: 8px 16px; margin-top: 12px; }
+    table { border-collapse: collapse; margin-top: 20px; width: 100%; }
+    td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Commercial Registration Search</h1>
+  <label for="cr_number">CR Number</label>
+  <input id="cr_number" name="cr_number" type="text" />
+  <label for="secret">Operator PIN (redaction test field)</label>
+  <input id="secret" name="secret" type="password" />
+  <button id="btn_search" type="button">Search</button>
+  <table id="results" hidden>
+    <thead><tr><th>CR No.</th><th>Name</th><th>Status</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <script>
+    document.getElementById('btn_search').addEventListener('click', async () => {
+      // Cross-hostname noise call: the recorder allowlists 127.0.0.1, so this
+      // localhost request must never appear in a capture.
+      fetch('http://localhost:' + location.port + '/noise').catch(() => {});
+
+      const res = await fetch('/api/CRdetails/AdvanceSearchCR_Paging', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ CR_NO: document.getElementById('cr_number').value, PAGE: 1 }),
+      });
+      const data = await res.json();
+      const tbody = document.querySelector('#results tbody');
+      tbody.innerHTML = '';
+      for (const r of data.RECORDS) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${r.CR_NO}</td><td>${r.NAME_EN}</td><td>${r.STATUS}</td>`;
+        tbody.appendChild(tr);
+      }
+      document.getElementById('results').hidden = false;
+    });
+  </script>
+</body>
+</html>

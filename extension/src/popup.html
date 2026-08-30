@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Workflow Recorder</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="card">
+    <header class="head">
+      <h1>Workflow Recorder</h1>
+      <span id="badge" class="badge badge-idle">Idle</span>
+    </header>
+
+    <div id="form">
+      <label class="field">
+        <span class="label">Session code</span>
+        <input id="session" type="text" spellcheck="false" autocomplete="off" placeholder="e.g. sijilat-demo-1" />
+      </label>
+      <label class="field">
+        <span class="label">Allowed hosts</span>
+        <input id="hosts" type="text" spellcheck="false" autocomplete="off" value="sijilat.bh, api.sijilat.bh" />
+        <span class="hint">Only traffic to these hosts is captured. Everything else is dropped.</span>
+      </label>
+    </div>
+
+    <div id="live" hidden>
+      <dl class="stats">
+        <div class="stat"><dt>Session</dt><dd id="stat-session">–</dd></div>
+        <div class="stat"><dt>Events</dt><dd id="stat-count">0</dd></div>
+      </dl>
+      <p id="error" class="error" hidden></p>
+    </div>
+
+    <button id="toggle" class="btn btn-start">Start recording</button>
+
+    <footer class="foot">
+      <span>Backend <code>127.0.0.1:4823</code></span>
+      <a id="sessions-link" href="http://127.0.0.1:4823/" target="_blank" rel="noreferrer">Sessions ↗</a>
+    </footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

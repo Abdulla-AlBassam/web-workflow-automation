@@ -1,0 +1,22 @@
+{
+  "name": "sijilat-automation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "backend": "tsx backend/src/server.ts",
+    "build:ext": "node extension/build.mjs",
+    "fixture": "node fixtures/serve.mjs",
+    "e2e": "node e2e/record.e2e.mjs"
+  },
+  "dependencies": {
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "playwright": "^1.49.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

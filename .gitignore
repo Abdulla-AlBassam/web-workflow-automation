@@ -2,5 +2,7 @@ node_modules/
 dist/
 .env
 exports/
+backend/data/
+e2e/.tmp/
 *.log
 .DS_Store
