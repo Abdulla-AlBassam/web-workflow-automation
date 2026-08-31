@@ -8,7 +8,8 @@ import { analyse } from '../backend/src/analyse.ts';
 import { toSpec } from '../backend/src/generate.ts';
 import { run } from '../runner/src/run.ts';
 
-const MOCK = 'http://127.0.0.1:4980';
+const MOCK_PORT = 4983; // dedicated port: never collide with an interactive mock or backend
+const MOCK = `http://127.0.0.1:${MOCK_PORT}`;
 const failures = [];
 function check(name, cond, detail = '') {
   console.log(`${cond ? '  ok ' : 'FAIL'} ${name}${cond || !detail ? '' : ` — ${detail}`}`);
@@ -18,7 +19,10 @@ const noToken = async () => { throw new Error('token reader must not be called o
 
 async function wait(u) { for (let i = 0; i < 60; i++) { try { if ((await fetch(u)).ok) return; } catch {} await new Promise((r) => setTimeout(r, 150)); } throw new Error('timeout ' + u); }
 
-const mock = spawn('node', ['fixtures/serve.mjs'], { cwd: process.cwd(), stdio: 'ignore' });
+const busy = await fetch(`${MOCK}/`).then(() => true).catch(() => false);
+if (busy) throw new Error(`port ${MOCK_PORT} already in use — stop whatever is running there before the suite`);
+
+const mock = spawn('node', ['fixtures/serve.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: String(MOCK_PORT) }, stdio: 'ignore' });
 try {
   await wait(`${MOCK}/`);
 

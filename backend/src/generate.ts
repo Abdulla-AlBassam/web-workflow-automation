@@ -1,7 +1,11 @@
 import { leaves, type Analysis, type Call } from './analyse.js';
 
+// Bumped whenever the generator learns something new (e.g. pagination), so
+// saved specs from an older generator are refreshed before use.
+export const SPEC_VERSION = 2;
+
 export type Spec = {
-  version: 1;
+  version: number;
   name: string;
   origin: string;
   language: string;
@@ -108,7 +112,7 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
   const extract = extractionPaths(outcome);
   const pagination = detectPagination(outcome, extract);
   return {
-    version: 1,
+    version: SPEC_VERSION,
     name: opts.name,
     origin: opts.origin,
     language: analysis.language,

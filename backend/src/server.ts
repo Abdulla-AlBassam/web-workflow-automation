@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import { appendEvents, createSession, getMeta, getSpec, listSessions, readEvents, saveMeta, saveSpec, status } from './store.js';
 import { sanitise } from './redact.js';
 import { analyse } from './analyse.js';
-import { toSpec } from './generate.js';
+import { SPEC_VERSION, toSpec } from './generate.js';
 import { probeAuth } from './probe.js';
 import { renderDetail, renderList } from './views.js';
 import { run } from '../../runner/src/run.js';
@@ -73,6 +73,15 @@ async function autoSpec(id: string) {
   return spec;
 }
 
+// A spec saved by an older generator is regenerated before use, so sessions
+// recorded before a feature (e.g. pagination) still benefit from it.
+async function freshSpec(id: string) {
+  const saved = getSpec(id) as { version?: number } | undefined;
+  if (saved?.version === SPEC_VERSION) return saved;
+  const regenerated = await autoSpec(id).catch(() => undefined);
+  return regenerated ?? saved;
+}
+
 app.get('/api/sessions', async () => listSessions().map((m) => ({ ...m, status: status(m) })));
 
 app.get('/api/sessions/:id/export', async (req, reply) => {
@@ -131,7 +140,7 @@ async function cachedReadToken(loadUrl: string, readToken: string): Promise<stri
 
 app.post('/api/sessions/:id/run', async (req, reply) => {
   const { id } = req.params as { id: string };
-  const spec = getSpec(id) as Parameters<typeof run>[0] | undefined;
+  const spec = (await freshSpec(id)) as Parameters<typeof run>[0] | undefined;
   if (!spec) return reply.code(404).send({ error: 'no spec for this session' });
   const { params } = (req.body ?? {}) as { params?: Record<string, string> };
   return run(spec, params ?? {}, { readToken: cachedReadToken });
@@ -149,7 +158,7 @@ app.get('/session/:id', async (req, reply) => {
   const events = readEvents(id);
   const a = analyse({ meta: { session: id, status: status(meta) }, events });
   reply.type('text/html');
-  return renderDetail(meta, status(meta), a, events, getSpec(id));
+  return renderDetail(meta, status(meta), a, events, await freshSpec(id));
 });
 
 const port = Number(process.env.PORT ?? 4823);

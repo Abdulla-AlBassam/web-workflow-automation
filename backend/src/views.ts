@@ -64,7 +64,8 @@ textarea:focus-visible { outline:2px solid var(--accent); outline-offset:2px; bo
 .run-steps { list-style:none; margin-top:12px; display:flex; flex-direction:column; gap:4px; font-size:12px; }
 .ok-note { font-size:12px; color:var(--ok); background:#E7F3ED; border-radius:8px; padding:8px 10px; margin-top:10px; }
 .fail-note { font-size:12px; color:var(--rec); background:#FBEAEA; border-radius:8px; padding:8px 10px; margin-top:10px; }
-.table-wrap { overflow-x:auto; margin-top:10px; }
+.table-wrap { overflow:auto; max-height:440px; margin-top:10px; }
+.table-wrap thead th { position:sticky; top:0; background:var(--surface); }
 details.spec-json { margin-top:12px; } details.spec-json summary { font-size:12px; color:var(--muted); cursor:pointer; }
 `;
 
@@ -238,13 +239,17 @@ function renderSpec(spec: any, session: string): string {
       return wrap;
     }
 
-    function rowsTable(rows, caption) {
+    const DISPLAY_CAP = 200;
+    function rowsTable(rows, label) {
       const cols = Object.keys(rows[0] ?? {}).slice(0, 6);
+      const caption = rows.length <= DISPLAY_CAP
+        ? label + ': ' + rows.length + ' rows'
+        : label + ': first ' + DISPLAY_CAP + ' of ' + rows.length + ' rows — download for the full set';
       return '<p class="sub" style="margin-top:10px">' + esc(caption) + '</p>' +
         '<div class="table-wrap"><table><thead><tr>' +
         cols.map((c) => '<th>' + esc(c) + '</th>').join('') +
         '</tr></thead><tbody>' +
-        rows.slice(0, 10).map((row) => '<tr>' + cols.map((c) =>
+        rows.slice(0, DISPLAY_CAP).map((row) => '<tr>' + cols.map((c) =>
           '<td class="sub">' + esc(String(row[c] ?? '').slice(0, 60)) + '</td>').join('') + '</tr>').join('') +
         '</tbody></table></div>';
     }
@@ -264,7 +269,8 @@ function renderSpec(spec: any, session: string): string {
           if (name === 'total') continue;
           if (v && typeof v === 'object' && Array.isArray(v.rows)) {
             rows = v.rows;
-            html += rowsTable(rows, name + ': showing ' + Math.min(10, rows.length) + ' of ' + (total ?? v.count));
+            const capped = total && Number(total) > rows.length;
+            html += rowsTable(rows, capped ? name + ' (' + total + ' total, page cap reached)' : name);
           } else {
             html += '<p class="sub" style="margin-top:6px">' + esc(name) + ': <span class="mono">' + esc(v) + '</span></p>';
           }
@@ -321,7 +327,7 @@ function renderSpec(spec: any, session: string): string {
       }
       status.textContent = 'Done: ' + values.length + ' inputs, ' + aggregated.length + ' rows' + (failed ? ', ' + failed + ' failed' : '');
       if (aggregated.length) {
-        bulkOut.innerHTML += rowsTable(aggregated, 'aggregated: showing ' + Math.min(10, aggregated.length) + ' of ' + aggregated.length);
+        bulkOut.innerHTML += rowsTable(aggregated, 'aggregated');
         bulkOut.append(exportButtons(aggregated, 'bulk-export'));
       }
       bulkBtn.disabled = false;

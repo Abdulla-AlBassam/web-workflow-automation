@@ -30,6 +30,17 @@ async function waitFor(url, ms = 8000) {
   throw new Error(`timed out waiting for ${url}`);
 }
 
+// The extension build hardcodes the backend at 4823, so this suite needs that
+// port and the mock's 4980. Fail fast with a clear message instead of silently
+// testing against an interactively running backend.
+for (const port of [4823, 4980]) {
+  const busy = await fetch(`http://127.0.0.1:${port}/`).then(() => true).catch(() => false);
+  if (busy) {
+    console.error(`port ${port} already in use — stop the running backend/mock (npm run backend) before npm run e2e`);
+    process.exit(2);
+  }
+}
+
 const dataDir = mkdtempSync(join(tmpdir(), 'wfr-e2e-data-'));
 const profileDir = mkdtempSync(join(tmpdir(), 'wfr-e2e-profile-'));
 const procs = [

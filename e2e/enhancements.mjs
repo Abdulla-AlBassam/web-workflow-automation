@@ -1,12 +1,16 @@
 // P1 feature suite: pagination detection + fetch-all replay, and sequential
 // runs (the server side of bulk). Fixture-driven. Run: node e2e/enhancements.mjs
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const BACKEND = 'http://127.0.0.1:4823';
-const MOCK = 'http://127.0.0.1:4980';
+// Dedicated ports: the suite must never talk to an interactively running
+// backend (npm run backend) or its data directory.
+const BACKEND_PORT = 4891;
+const MOCK_PORT = 4981;
+const BACKEND = `http://127.0.0.1:${BACKEND_PORT}`;
+const MOCK = `http://127.0.0.1:${MOCK_PORT}`;
 const failures = [];
 function check(name, cond, detail = '') {
   console.log(`${cond ? '  ok ' : 'FAIL'} ${name}${cond || !detail ? '' : ` — ${detail}`}`);
@@ -17,10 +21,17 @@ const api = (path, body) => fetch(`${BACKEND}${path}`, body === undefined ? {} :
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
 }).then((r) => r.json());
 
+async function ensureFree(port) {
+  const busy = await fetch(`http://127.0.0.1:${port}/`).then(() => true).catch(() => false);
+  if (busy) throw new Error(`port ${port} already in use — stop whatever is running there before the suite`);
+}
+await ensureFree(BACKEND_PORT);
+await ensureFree(MOCK_PORT);
+
 const dataDir = mkdtempSync(join(tmpdir(), 'wfr-enh-'));
 const procs = [
-  spawn('npx', ['tsx', 'backend/src/server.ts'], { cwd: process.cwd(), env: { ...process.env, DATA_DIR: dataDir }, stdio: 'ignore' }),
-  spawn('node', ['fixtures/serve.mjs'], { cwd: process.cwd(), stdio: 'ignore' }),
+  spawn('npx', ['tsx', 'backend/src/server.ts'], { cwd: process.cwd(), env: { ...process.env, DATA_DIR: dataDir, PORT: String(BACKEND_PORT) }, stdio: 'ignore' }),
+  spawn('node', ['fixtures/serve.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: String(MOCK_PORT) }, stdio: 'ignore' }),
 ];
 
 try {
@@ -65,6 +76,18 @@ try {
   check('bulk rows are input-specific',
     results[0].extracted.records.rows[0].NAME_EN.includes('Gulf Line') &&
     results[1].extracted.records.rows[0].NAME_EN.includes('Isa Town'));
+
+  // A spec saved by an older generator (no pagination, old version) must be
+  // regenerated before use, not executed as-is.
+  const specPath = join(dataDir, 'enh', 'spec.json');
+  const stale = JSON.parse(readFileSync(specPath, 'utf8'));
+  stale.version = 1;
+  delete stale.outcome.pagination;
+  writeFileSync(specPath, JSON.stringify(stale));
+  const upgraded = await api('/api/sessions/enh/run', { params: { cr_name_en: 'trading' } });
+  check('stale spec regenerated on run', upgraded.ok && upgraded.extracted?.records?.count === 5,
+    `count=${upgraded.extracted?.records?.count}`);
+  check('regenerated spec persisted', JSON.parse(readFileSync(specPath, 'utf8')).version !== 1);
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {
