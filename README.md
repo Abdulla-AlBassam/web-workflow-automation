@@ -16,8 +16,8 @@ and analysis work on other pages too.
   (`backend/`). Cookies, auth headers and password values are never retained;
   traffic is allowlisted to the target hosts.
 - **Analyse** (`backend/src/analyse.ts`) — deterministic correlation: which
-  typed value landed in which request body, and which request returned the
-  outcome. No LLM.
+  typed value landed in which request body or URL (encoded forms included),
+  and which request returned the outcome. No LLM.
 - **Generate** (`backend/src/generate.ts`) — a parameterised spec
   (`docs/spec.md`) that prefers one direct request. A body-only probe
   (`backend/src/probe.ts`) decides whether an auth step is needed.
