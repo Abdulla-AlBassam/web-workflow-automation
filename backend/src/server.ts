@@ -5,6 +5,8 @@ import { analyse } from './analyse.js';
 import { toSpec } from './generate.js';
 import { probeAuth } from './probe.js';
 import { renderDetail, renderList } from './views.js';
+import { run } from '../../runner/src/run.js';
+import { readTokenViaBrowser } from '../../runner/src/browser-token.js';
 
 const app = Fastify({ logger: { level: 'warn' } });
 
@@ -53,8 +55,23 @@ app.post('/api/sessions/:id/stop', async (req, reply) => {
   const { stoppedAt } = req.body as { stoppedAt?: number };
   meta.stoppedAt = stoppedAt ?? Date.now();
   saveMeta(meta);
-  return { ok: true };
+  // Analyse and generate immediately so the session page is ready the moment
+  // the operator lands on it. A workflow with no identifiable outcome just
+  // has no spec; the page explains why from the analysis notes.
+  const spec = await autoSpec(id).catch(() => undefined);
+  return { ok: true, spec: !!spec };
 });
+
+async function autoSpec(id: string) {
+  const a = loadAnalysis(id);
+  if (!a?.outcome) return undefined;
+  const page = readEvents(id).find((e) => e.kind === 'page' && typeof e.url === 'string');
+  const loadUrl = (page?.url as string) ?? a.outcome.url;
+  const probeStatus = await probeAuth(a.outcome).catch(() => undefined);
+  const spec = toSpec(a, { name: id, origin: new URL(loadUrl).origin, loadUrl, probeStatus });
+  saveSpec(id, spec);
+  return spec;
+}
 
 app.get('/api/sessions', async () => listSessions().map((m) => ({ ...m, status: status(m) })));
 
@@ -90,19 +107,22 @@ app.get('/api/sessions/:id/analysis', async (req, reply) => {
 
 app.post('/api/sessions/:id/spec', async (req, reply) => {
   const { id } = req.params as { id: string };
-  const a = loadAnalysis(id);
-  if (!a) return reply.code(404).send({ error: 'unknown session' });
-  const { name, origin, loadUrl, probe } = req.body as { name?: string; origin?: string; loadUrl?: string; probe?: boolean };
-  if (!name || !origin || !loadUrl) return reply.code(400).send({ error: 'name, origin and loadUrl required' });
-  // Probe is opt-in: it makes one unauthenticated call to the outcome endpoint.
-  const probeStatus = probe && a.outcome ? await probeAuth(a.outcome).catch(() => undefined) : undefined;
+  if (!getMeta(id)) return reply.code(404).send({ error: 'unknown session' });
   try {
-    const spec = toSpec(a, { name, origin, loadUrl, probeStatus });
-    saveSpec(id, spec);
+    const spec = await autoSpec(id);
+    if (!spec) return reply.code(422).send({ error: 'no parameterised outcome call identified' });
     return spec;
   } catch (e) {
     return reply.code(422).send({ error: (e as Error).message });
   }
+});
+
+app.post('/api/sessions/:id/run', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const spec = getSpec(id) as Parameters<typeof run>[0] | undefined;
+  if (!spec) return reply.code(404).send({ error: 'no spec for this session' });
+  const { params } = (req.body ?? {}) as { params?: Record<string, string> };
+  return run(spec, params ?? {}, { readToken: readTokenViaBrowser });
 });
 
 app.get('/', async (_req, reply) => {

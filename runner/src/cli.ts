@@ -22,7 +22,10 @@ for (const s of result.steps) console.log(`  ✓ ${s.id} (${s.type}): ${s.detail
 console.log();
 if (result.ok) {
   console.log('OUTCOME OK —', result.outcome?.expected);
-  console.log('extracted:', JSON.stringify(result.extracted));
+  for (const [k, v] of Object.entries(result.extracted ?? {})) {
+    const summary = v && typeof v === 'object' && 'count' in (v as any) ? `${(v as any).count} records` : JSON.stringify(v);
+    console.log(`  ${k}: ${summary}`);
+  }
 } else {
   console.log('STOPPED —', result.stoppedReason);
 }

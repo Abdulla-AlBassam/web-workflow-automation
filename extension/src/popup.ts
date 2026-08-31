@@ -33,6 +33,9 @@ toggle.addEventListener('click', async () => {
   const state = await chrome.runtime.sendMessage({ type: 'status' });
   if (state.on) {
     await chrome.runtime.sendMessage({ type: 'stop' });
+    // Land the operator on the session page, where the analysis and the
+    // generated automation are already waiting.
+    await chrome.tabs.create({ url: `http://127.0.0.1:4823/session/${state.session}` });
     await refresh();
     return;
   }

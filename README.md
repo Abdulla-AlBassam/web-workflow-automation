@@ -40,29 +40,22 @@ Load `extension/dist` as an unpacked extension at `chrome://extensions`
 npm run backend          # http://127.0.0.1:4823
 ```
 
-## Record a session
+## Record and automate — the whole loop
 
-Open the target page, click the extension, enter a session code and the allowed
-hosts, and Start. Perform the workflow, then Stop. The session appears at
-`http://127.0.0.1:4823/` — open it for the timeline, the analysis, and (once
-generated) the spec.
+1. Open the target page, click the extension, enter a session code, **Start**.
+2. Perform the workflow once. Click **Stop**.
+3. The session page opens by itself. Stopping triggers analysis and spec
+   generation automatically — the page shows the timeline, which request
+   produced the outcome, and the generated automation.
+4. Type a new value into the **Run the automation** box and click **Run**. The
+   generated steps execute (token step if needed, then one direct call), the
+   outcome is validated, and the results render on the page.
 
-Generate the spec for a recorded session:
-
-```bash
-curl -s -X POST 127.0.0.1:4823/api/sessions/<id>/spec \
-  -H 'content-type: application/json' \
-  -d '{"name":"sijilat-cr-search","origin":"https://www.sijilat.bh","loadUrl":"https://www.sijilat.bh/public-search-cr/search-cr-2.aspx","probe":true}'
-```
-
-## Replay against a new input
+No terminal involved after setup. The same replay is also available as a CLI:
 
 ```bash
 npm run run -- fixtures/sijilat-cr-search.spec.json cr_name_en=pharmacy
 ```
-
-The runner acquires the anonymous token the site issues client-side, makes the
-one direct search call, validates the outcome, and prints the extracted result.
 
 ## Tests
 

@@ -48,6 +48,21 @@ code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-vari
 .note { font-size:12px; color:var(--warn); background:#FDF3E3; border-radius:8px; padding:8px 10px; }
 pre { background:#0F1420; color:#E6EDF3; border-radius:8px; padding:12px; overflow:auto; font-size:12px; line-height:1.5; }
 .crumb { font-size:12px; color:var(--muted); margin-bottom:2px; }
+.runrow { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
+.runrow label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+.runrow input { font:inherit; font-variant-numeric:tabular-nums; border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:200px; transition:border-color 150ms ease-out; }
+.runrow input:hover { border-color:#C9CED6; }
+.runrow input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-color:var(--accent); }
+.btn { font:inherit; font-weight:600; border:none; border-radius:8px; padding:9px 16px; min-height:36px; cursor:pointer; background:var(--accent); color:#fff; transition:background-color 150ms ease-out, transform 100ms ease-out, opacity 150ms ease-out; }
+.btn:hover:not(:disabled) { background:#1D4FD7; }
+.btn:active { transform:scale(0.96); }
+.btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.btn:disabled { opacity:0.5; cursor:default; transform:none; }
+.run-steps { list-style:none; margin-top:12px; display:flex; flex-direction:column; gap:4px; font-size:12px; }
+.ok-note { font-size:12px; color:var(--ok); background:#E7F3ED; border-radius:8px; padding:8px 10px; margin-top:10px; }
+.fail-note { font-size:12px; color:var(--rec); background:#FBEAEA; border-radius:8px; padding:8px 10px; margin-top:10px; }
+.table-wrap { overflow-x:auto; margin-top:10px; }
+details.spec-json { margin-top:12px; } details.spec-json summary { font-size:12px; color:var(--muted); cursor:pointer; }
 `;
 
 function esc(s: unknown): string {
@@ -114,11 +129,8 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
     <td class="sub">${esc(c.resultShape ?? '')}</td>
   </tr>`).join('');
 
-  const specCard = spec ? renderSpec(spec) : `<div class="card"><h2>Generated spec</h2>
-    <p class="sub">Not generated yet. Create it with:</p>
-    <pre>curl -s -X POST 127.0.0.1:4823/api/sessions/${esc(meta.session)}/spec \\
-  -H 'content-type: application/json' \\
-  -d '{"name":"${esc(meta.session)}","origin":"https://www.sijilat.bh","loadUrl":"https://www.sijilat.bh/public-search-cr/search-cr-2.aspx","probe":true}'</pre></div>`;
+  const specCard = spec ? renderSpec(spec, meta.session) : `<div class="card"><h2>Automation</h2>
+    <p class="note">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p></div>`;
 
   return shell(`Session ${meta.session}`, `
     <div class="card">
@@ -148,16 +160,82 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
     ${specCard}`);
 }
 
-function renderSpec(spec: any): string {
+function renderSpec(spec: any, session: string): string {
   const flow = spec.steps.map((s: any) =>
     `<span class="step step-${s.type === 'browser-token' ? 'token' : 'request'}">${esc(s.id)}<span class="sub"> · ${esc(s.type)}</span></span>`
   ).join('<span class="arrow">→</span>');
   const tokenNote = spec.steps.find((s: any) => s.type === 'browser-token');
+  const inputs = spec.parameters.map((p: any) =>
+    `<label>${esc(p.name)}<input id="param-${esc(p.name)}" value="${esc(p.example)}" spellcheck="false" autocomplete="off"></label>`
+  ).join('');
+
   return `<div class="card">
-    <h2>Generated spec <span class="sub">— best way to automate the outcome</span></h2>
+    <h2>Generated automation <span class="sub">— best way to reach the outcome</span></h2>
     <div class="flow">${flow}</div>
     ${tokenNote ? `<p class="note">${esc(tokenNote.reason)}</p>` : '<p class="sub">Pure direct-request automation: no browser step needed.</p>'}
-    <p class="sub" style="margin:10px 0 4px">Parameter <span class="mono">${esc(spec.parameters[0]?.name)}</span> (example <span class="mono">${esc(spec.parameters[0]?.example)}</span>) → replayable with a new value. Outcome gate: <span class="mono">${esc(spec.outcome.expect.path)}=${esc(spec.outcome.expect.equals)}</span>.</p>
-    <pre>${esc(JSON.stringify(spec, null, 2))}</pre>
-  </div>`;
+    <p class="sub" style="margin:10px 0 4px">Outcome gate: <span class="mono">${esc(spec.outcome.expect.path)}=${esc(spec.outcome.expect.equals)}</span>. The run stops with a reason if this check fails.</p>
+    <details class="spec-json"><summary>Show the spec JSON</summary><pre>${esc(JSON.stringify(spec, null, 2))}</pre></details>
+  </div>
+
+  <div class="card">
+    <h2>Run the automation</h2>
+    <p class="sub" style="margin-bottom:10px">Enter a new value and run. This executes the generated steps, not your recorded clicks.</p>
+    <div class="runrow">${inputs}<button id="run-btn" class="btn">Run</button></div>
+    <div id="run-out"></div>
+  </div>
+
+  <script>
+  (() => {
+    const params = ${JSON.stringify(spec.parameters.map((p: any) => p.name))};
+    const btn = document.getElementById('run-btn');
+    const out = document.getElementById('run-out');
+    const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      out.innerHTML = '<p class="sub" style="margin-top:10px">Running — acquiring token and calling the API…</p>';
+      const values = Object.fromEntries(params.map((p) => [p, document.getElementById('param-' + p).value.trim()]));
+      let res;
+      try {
+        const r = await fetch('/api/sessions/${esc(session)}/run', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ params: values }),
+        });
+        res = await r.json();
+      } catch (e) {
+        out.innerHTML = '<p class="fail-note">Could not reach the local backend: ' + esc(e.message) + '</p>';
+        btn.disabled = false;
+        return;
+      }
+      btn.disabled = false;
+
+      const steps = (res.steps ?? []).map((s) =>
+        '<li>✓ <span class="mono">' + esc(s.id) + '</span> <span class="sub">' + esc(s.detail) + '</span></li>').join('');
+      let html = '<ul class="run-steps">' + steps + '</ul>';
+
+      if (!res.ok) {
+        html += '<p class="fail-note">Stopped — ' + esc(res.stoppedReason) + '</p>';
+      } else {
+        html += '<p class="ok-note">Outcome verified (' + esc(res.outcome.expected) + ')</p>';
+        for (const [name, v] of Object.entries(res.extracted ?? {})) {
+          if (v && typeof v === 'object' && Array.isArray(v.sample)) {
+            const cols = Object.keys(v.sample[0] ?? {}).slice(0, 5);
+            html += '<p class="sub" style="margin-top:10px">' + esc(name) + ': ' + esc(v.count) +
+              ' total, first ' + v.sample.length + ' shown</p>' +
+              '<div class="table-wrap"><table><thead><tr>' +
+              cols.map((c) => '<th>' + esc(c) + '</th>').join('') +
+              '</tr></thead><tbody>' +
+              v.sample.map((row) => '<tr>' + cols.map((c) =>
+                '<td class="sub">' + esc(String(row[c] ?? '').slice(0, 60)) + '</td>').join('') + '</tr>').join('') +
+              '</tbody></table></div>';
+          } else {
+            html += '<p class="sub" style="margin-top:6px">' + esc(name) + ': <span class="mono">' + esc(v) + '</span></p>';
+          }
+        }
+      }
+      out.innerHTML = html;
+    });
+  })();
+  </script>`;
 }

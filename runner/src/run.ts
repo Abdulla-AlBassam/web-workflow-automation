@@ -104,7 +104,9 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
   const extracted: Record<string, unknown> = {};
   for (const [name, path] of Object.entries(extract)) {
     const v = resolvePath(finalResponse.body, path);
-    extracted[name] = Array.isArray(v) ? `${v.length} items` : v;
+    // Arrays are summarised with a small sample so the UI can show real rows
+    // without shipping the whole record set around.
+    extracted[name] = Array.isArray(v) ? { count: v.length, sample: v.slice(0, 10) } : v;
   }
 
   return { ok: true, steps, outcome: { expected: `${expect.path}=${expect.equals}`, actual, matched }, extracted };
