@@ -73,7 +73,10 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
       bearers[step.id] = bearer;
       steps.push({ id: step.id, type: step.type, detail: `token acquired (${bearer.length} chars)` });
     } else {
-      const body = substitute(step.bodyTemplate, params);
+      // URL placeholders take the parameter URL-encoded; body values go raw.
+      const url = step.url.replace(/\{\{(\w+)\}\}/g, (_, n) => encodeURIComponent(params[n] ?? ''));
+      const body = step.bodyTemplate === undefined ? undefined : substitute(step.bodyTemplate, params);
+      const payload = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
       const headers: Record<string, string> = { ...step.headers };
       if (step.bearerFrom) {
         const b = bearers[step.bearerFrom];
@@ -82,15 +85,15 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
       }
       let res: Response;
       try {
-        res = await fetch(step.url, { method: step.method, headers, body: JSON.stringify(body) });
+        res = await fetch(url, { method: step.method, headers, ...(payload === undefined ? {} : { body: payload }) });
       } catch (e) {
-        return { ok: false, stoppedReason: `request "${step.id}" failed to reach ${step.url}: ${(e as Error).message}`, steps };
+        return { ok: false, stoppedReason: `request "${step.id}" failed to reach ${url}: ${(e as Error).message}`, steps };
       }
       const text = await res.text();
       let parsed: unknown;
       try { parsed = JSON.parse(text); } catch { parsed = text; }
       finalResponse = { httpStatus: res.status, body: parsed };
-      outcomeRequest = { url: step.url, method: step.method, headers, body };
+      outcomeRequest = { url, method: step.method, headers, body };
       steps.push({ id: step.id, type: step.type, detail: `${step.method} → HTTP ${res.status}` });
     }
   }

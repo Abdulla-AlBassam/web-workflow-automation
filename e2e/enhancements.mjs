@@ -77,6 +77,26 @@ try {
     results[0].extracted.records.rows[0].NAME_EN.includes('Gulf Line') &&
     results[1].extracted.records.rows[0].NAME_EN.includes('Isa Town'));
 
+  // GET-style workflow: the typed value travels URL-encoded in the query
+  // string (the wwe.com shape), no request body at all.
+  await api('/api/sessions', { session: 'urly', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/urly/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'gulf line', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'GET', url: `${MOCK}/api/urlsearch?q=gulf%20line`, status: 200,
+      resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ CR_NO: '20775', NAME_EN: 'Gulf Line Logistics' }] }), seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]});
+  await api('/api/sessions/urly/stop', {});
+  const urlSpec = await api('/api/sessions/urly/spec', {});
+  check('URL-borne value produces a spec', !!urlSpec.steps, urlSpec.error);
+  check('URL is templatised', urlSpec.steps?.at(-1)?.url?.includes('{{cr_name_en}}'), urlSpec.steps?.at(-1)?.url);
+  check('GET step has no body', urlSpec.steps?.at(-1)?.bodyTemplate === undefined);
+  const urlRun = await api('/api/sessions/urly/run', { params: { cr_name_en: 'isa town' } });
+  check('GET replay with encoded new input works', urlRun.ok && urlRun.extracted?.records?.rows?.[0]?.NAME_EN === 'Isa Town Trading Co.',
+    urlRun.stoppedReason ?? JSON.stringify(urlRun.extracted?.records?.rows?.[0]));
+
   // A spec saved by an older generator (no pagination, old version) must be
   // regenerated before use, not executed as-is.
   const specPath = join(dataDir, 'enh', 'spec.json');

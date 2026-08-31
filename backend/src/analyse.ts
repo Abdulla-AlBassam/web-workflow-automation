@@ -6,7 +6,9 @@ export type Trace = { meta: { session: string; status: string }; events: Record<
 
 export type Input = { field: string; value: string; selector?: string };
 
-export type Match = { path: string; value: string; input: Input };
+// token is the exact substring that matched (URL matches may be encoded), so
+// spec generation can splice a placeholder in its place.
+export type Match = { path: string; value: string; input: Input; where: 'body' | 'url'; token: string };
 
 export type Call = {
   url: string;
@@ -55,14 +57,24 @@ export function* leaves(node: unknown, path = ''): Generator<{ path: string; val
   }
 }
 
-function findMatches(reqBody: string | undefined, inputs: Input[]): Match[] {
-  const parsed = parseBody(reqBody);
-  if (parsed === undefined) return [];
+function findMatches(reqBody: string | undefined, url: string, inputs: Input[]): Match[] {
   const matches: Match[] = [];
-  for (const { path, value } of leaves(parsed)) {
-    if (typeof value !== 'string' || !value) continue;
-    for (const input of inputs) {
-      if (value === input.value) matches.push({ path, value, input });
+  const parsed = parseBody(reqBody);
+  if (parsed !== undefined) {
+    for (const { path, value } of leaves(parsed)) {
+      if (typeof value !== 'string' || !value) continue;
+      for (const input of inputs) {
+        if (value === input.value) matches.push({ path, value, input, where: 'body', token: value });
+      }
+    }
+  }
+  // GET-style workflows carry the value in the URL instead, usually encoded.
+  for (const input of inputs) {
+    for (const token of new Set([input.value, encodeURIComponent(input.value), input.value.replace(/ /g, '+')])) {
+      if (url.includes(token)) {
+        matches.push({ path: 'url', value: input.value, input, where: 'url', token });
+        break;
+      }
     }
   }
   return matches;
@@ -103,7 +115,7 @@ export function analyse(trace: Trace): Analysis {
   const calls: Call[] = events
     .filter((e) => e.kind === 'net' && e.url)
     .map((e) => {
-      const matches = findMatches(e.reqBody as string, inputs);
+      const matches = findMatches(e.reqBody as string, e.url as string, inputs);
       const { shape, records } = describeResult(e.resBody as string);
       const ok = typeof e.status === 'number' && e.status >= 200 && e.status < 300;
       // Outcome ranking: a call that both carries an input value and returns a

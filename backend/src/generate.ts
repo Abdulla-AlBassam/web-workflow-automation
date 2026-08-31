@@ -23,7 +23,9 @@ export type Spec = {
 
 export type Step =
   | { id: string; type: 'browser-token'; loadUrl: string; readToken: string; bearerPath: string; reason: string }
-  | { id: string; type: 'request'; method: string; url: string; headers: Record<string, string>; bearerFrom?: string; bodyTemplate: unknown };
+  // url may contain {{param}} placeholders (URL-encoded at run time); GET
+  // workflows have no bodyTemplate at all.
+  | { id: string; type: 'request'; method: string; url: string; headers: Record<string, string>; bearerFrom?: string; bodyTemplate?: unknown };
 
 // Replace a matched leaf value with {{name}} everywhere it appears, so nested
 // DataTables payloads survive. Value-matched, not path-matched, on purpose.
@@ -99,14 +101,27 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
       reason: `direct call needs a bearer token (probe returned ${opts.probeStatus ?? analysis.authHint}); the site issues one client-side for anonymous users`,
     });
   }
+  const url = match.where === 'url' ? outcome.url.split(match.token).join(`{{${pname}}}`) : outcome.url;
+  let bodyTemplate: unknown;
+  if (outcome.reqBody) {
+    if (match.where === 'body') {
+      bodyTemplate = templatise(outcome.reqBody, match.value, pname);
+    } else {
+      // Constant body alongside a URL-borne parameter: keep it verbatim.
+      try { bodyTemplate = JSON.parse(outcome.reqBody); } catch { bodyTemplate = outcome.reqBody; }
+    }
+  }
   steps.push({
     id: 'search',
     type: 'request',
     method: outcome.method,
-    url: outcome.url,
-    headers: { 'content-type': 'application/json; charset=utf-8', accept: '*/*' },
+    url,
+    headers: {
+      accept: '*/*',
+      ...(bodyTemplate !== undefined ? { 'content-type': 'application/json; charset=utf-8' } : {}),
+    },
     ...(needsAuth ? { bearerFrom: 'token' } : {}),
-    bodyTemplate: templatise(outcome.reqBody!, match.value, pname),
+    ...(bodyTemplate !== undefined ? { bodyTemplate } : {}),
   });
 
   const extract = extractionPaths(outcome);

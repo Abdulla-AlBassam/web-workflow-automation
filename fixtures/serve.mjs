@@ -39,6 +39,12 @@ createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ TOTAL: hits.length, RECORDS: hits.slice((page - 1) * PER_PAGE, page * PER_PAGE) }));
     });
+  } else if (req.method === 'GET' && req.url.startsWith('/api/urlsearch')) {
+    // GET-style search: the term arrives in the query string, like wwe.com.
+    const q = new URL(req.url, `http://127.0.0.1:${PORT}`).searchParams.get('q') ?? '';
+    const hits = COMPANIES.filter((c) => c.NAME_EN.toLowerCase().includes(q.toLowerCase()));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ TOTAL: hits.length, RECORDS: hits }));
   } else if (req.method === 'GET' && req.url === '/noise') {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
     res.end('{"noise":true}');
