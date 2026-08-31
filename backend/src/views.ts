@@ -218,11 +218,15 @@ function renderSpec(spec: any, session: string): string {
         html += '<p class="fail-note">Stopped — ' + esc(res.stoppedReason) + '</p>';
       } else {
         html += '<p class="ok-note">Outcome verified (' + esc(res.outcome.expected) + ')</p>';
+        // A "total" scalar (e.g. Total_Records) captions the records table
+        // instead of rendering as its own line.
+        const total = res.extracted && !Array.isArray(res.extracted.total?.sample) ? res.extracted.total : undefined;
         for (const [name, v] of Object.entries(res.extracted ?? {})) {
+          if (name === 'total' && total !== undefined) continue;
           if (v && typeof v === 'object' && Array.isArray(v.sample)) {
             const cols = Object.keys(v.sample[0] ?? {}).slice(0, 5);
-            html += '<p class="sub" style="margin-top:10px">' + esc(name) + ': ' + esc(v.count) +
-              ' total, first ' + v.sample.length + ' shown</p>' +
+            html += '<p class="sub" style="margin-top:10px">' + esc(name) + ': showing ' + v.sample.length +
+              ' of ' + esc(total ?? v.count) + '</p>' +
               '<div class="table-wrap"><table><thead><tr>' +
               cols.map((c) => '<th>' + esc(c) + '</th>').join('') +
               '</tr></thead><tbody>' +
