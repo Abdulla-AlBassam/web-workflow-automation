@@ -49,7 +49,13 @@ npm run backend          # http://127.0.0.1:4823
    produced the outcome, and the generated automation.
 4. Type a new value into the **Run the automation** box and click **Run**. The
    generated steps execute (token step if needed, then one direct call), the
-   outcome is validated, and the results render on the page.
+   outcome is validated, and the results render on the page. When the API is
+   page-based, the runner detects it and fetches every page, not just the
+   first.
+5. **Bulk run**: paste one value per line and Run all — rows execute
+   sequentially with a delay, statuses show per input, and results aggregate
+   into one table. **Download CSV / JSON** buttons appear under any results
+   table.
 
 No terminal involved after setup. The same replay is also available as a CLI:
 
@@ -60,8 +66,9 @@ npm run run -- fixtures/sijilat-cr-search.spec.json cr_name_en=pharmacy
 ## Tests
 
 ```bash
-npm run e2e              # full capture path, real Chromium against the mock
-npm run test:failures    # interrupted / missing param / missing endpoint / changed outcome / absent token
+npm run e2e                # full capture path, real Chromium against the mock
+npm run test:failures      # interrupted / missing param / missing endpoint / changed outcome / absent token
+npm run test:enhancements  # pagination detection, fetch-all replay, sequential bulk runs
 npm run typecheck
 ```
 

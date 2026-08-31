@@ -1,4 +1,4 @@
-import type { Analysis, Call } from './analyse.js';
+import { leaves, type Analysis, type Call } from './analyse.js';
 
 export type Spec = {
   version: 1;
@@ -7,7 +7,14 @@ export type Spec = {
   language: string;
   parameters: { name: string; example: string; required: boolean }[];
   steps: Step[];
-  outcome: { fromStep: string; expect: { path: string; equals: string }; extract: Record<string, string> };
+  outcome: {
+    fromStep: string;
+    expect: { path: string; equals: string };
+    extract: Record<string, string>;
+    // Present when the outcome call is page-based: the runner re-issues it
+    // with an incremented page value until the extracted total is reached.
+    pagination?: { pagePath: string };
+  };
 };
 
 export type Step =
@@ -47,9 +54,22 @@ function extractionPaths(call: Call): Record<string, string> {
   const at = shape.match(/at ([\w.]+)$/)?.[1];
   const out: Record<string, string> = {};
   if (at) out.records = at;
-  const parsed = JSON.parse(call.resBody ?? '{}');
-  if (parsed?.jsonData?.Total_Records !== undefined) out.total = 'jsonData.Total_Records';
+  for (const { path, value } of leaves(JSON.parse(call.resBody ?? '{}'))) {
+    const key = path.split('.').at(-1) ?? '';
+    if (/total/i.test(key) && !Number.isNaN(Number(value))) { out.total = path; break; }
+  }
   return out;
+}
+
+// Page-based outcome: a numeric request field named like "page" plus a total
+// in the response means the recording only saw one page of the result.
+function detectPagination(call: Call, extract: Record<string, string>): { pagePath: string } | undefined {
+  if (!extract.total || !extract.records) return undefined;
+  for (const { path, value } of leaves(JSON.parse(call.reqBody ?? '{}'))) {
+    const key = path.split('.').at(-1) ?? '';
+    if (/^page(_?number)?$/i.test(key) && typeof value === 'number') return { pagePath: path };
+  }
+  return undefined;
 }
 
 export function toSpec(analysis: Analysis, opts: { name: string; origin: string; loadUrl: string; probeStatus?: number }): Spec {
@@ -85,6 +105,8 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     bodyTemplate: templatise(outcome.reqBody!, match.value, pname),
   });
 
+  const extract = extractionPaths(outcome);
+  const pagination = detectPagination(outcome, extract);
   return {
     version: 1,
     name: opts.name,
@@ -92,6 +114,11 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     language: analysis.language,
     parameters: [{ name: pname, example: match.value, required: true }],
     steps,
-    outcome: { fromStep: 'search', expect: outcomeExpectation(outcome), extract: extractionPaths(outcome) },
+    outcome: {
+      fromStep: 'search',
+      expect: outcomeExpectation(outcome),
+      extract,
+      ...(pagination ? { pagination } : {}),
+    },
   };
 }

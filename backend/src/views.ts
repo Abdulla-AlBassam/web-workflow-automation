@@ -53,6 +53,9 @@ pre { background:#0F1420; color:#E6EDF3; border-radius:8px; padding:12px; overfl
 .runrow input { font:inherit; font-variant-numeric:tabular-nums; border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:200px; transition:border-color 150ms ease-out; }
 .runrow input:hover { border-color:#C9CED6; }
 .runrow input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-color:var(--accent); }
+textarea { font:inherit; width:100%; border:1px solid var(--border); border-radius:8px; padding:8px 10px; resize:vertical; transition:border-color 150ms ease-out; }
+textarea:hover { border-color:#C9CED6; }
+textarea:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-color:var(--accent); }
 .btn { font:inherit; font-weight:600; border:none; border-radius:8px; padding:9px 16px; min-height:36px; cursor:pointer; background:var(--accent); color:#fff; transition:background-color 150ms ease-out, transform 100ms ease-out, opacity 150ms ease-out; }
 .btn:hover:not(:disabled) { background:#1D4FD7; }
 .btn:active { transform:scale(0.96); }
@@ -184,61 +187,144 @@ function renderSpec(spec: any, session: string): string {
     <div id="run-out"></div>
   </div>
 
+  ${spec.parameters.length === 1 ? `<div class="card">
+    <h2>Bulk run</h2>
+    <p class="sub" style="margin-bottom:10px">One <span class="mono">${esc(spec.parameters[0].name)}</span> per line. Rows run one at a time with a delay between them; results aggregate into a single exportable table.</p>
+    <textarea id="bulk-values" rows="4" placeholder="value one&#10;value two&#10;value three"></textarea>
+    <div class="runrow" style="margin-top:10px"><button id="bulk-btn" class="btn">Run all</button><span id="bulk-status" class="sub"></span></div>
+    <div id="bulk-out"></div>
+  </div>` : ''}
+
   <script>
   (() => {
     const params = ${JSON.stringify(spec.parameters.map((p: any) => p.name))};
-    const btn = document.getElementById('run-btn');
-    const out = document.getElementById('run-out');
     const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      out.innerHTML = '<p class="sub" style="margin-top:10px">Running — acquiring token and calling the API…</p>';
-      const values = Object.fromEntries(params.map((p) => [p, document.getElementById('param-' + p).value.trim()]));
-      let res;
-      try {
-        const r = await fetch('/api/sessions/${esc(session)}/run', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ params: values }),
-        });
-        res = await r.json();
-      } catch (e) {
-        out.innerHTML = '<p class="fail-note">Could not reach the local backend: ' + esc(e.message) + '</p>';
-        btn.disabled = false;
-        return;
-      }
-      btn.disabled = false;
+    async function runOnce(values) {
+      const r = await fetch('/api/sessions/${esc(session)}/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ params: values }),
+      });
+      return r.json();
+    }
 
+    function download(filename, mime, content) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([content], { type: mime }));
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    function toCsv(rows) {
+      const cols = [];
+      for (const row of rows) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
+      const cell = (v) => '"' + String(v ?? '').replaceAll('"', '""') + '"';
+      return [cols.map(cell).join(','), ...rows.map((r) => cols.map((c) => cell(r[c])).join(','))].join('\\n');
+    }
+
+    function exportButtons(rows, base) {
+      const wrap = document.createElement('div');
+      wrap.className = 'runrow';
+      wrap.style.marginTop = '10px';
+      const csv = document.createElement('button');
+      csv.className = 'btn'; csv.textContent = 'Download CSV';
+      csv.addEventListener('click', () => download(base + '.csv', 'text/csv', toCsv(rows)));
+      const json = document.createElement('button');
+      json.className = 'btn'; json.textContent = 'Download JSON';
+      json.addEventListener('click', () => download(base + '.json', 'application/json', JSON.stringify(rows, null, 2)));
+      wrap.append(csv, json);
+      return wrap;
+    }
+
+    function rowsTable(rows, caption) {
+      const cols = Object.keys(rows[0] ?? {}).slice(0, 6);
+      return '<p class="sub" style="margin-top:10px">' + esc(caption) + '</p>' +
+        '<div class="table-wrap"><table><thead><tr>' +
+        cols.map((c) => '<th>' + esc(c) + '</th>').join('') +
+        '</tr></thead><tbody>' +
+        rows.slice(0, 10).map((row) => '<tr>' + cols.map((c) =>
+          '<td class="sub">' + esc(String(row[c] ?? '').slice(0, 60)) + '</td>').join('') + '</tr>').join('') +
+        '</tbody></table></div>';
+    }
+
+    function renderResult(res, out, base) {
       const steps = (res.steps ?? []).map((s) =>
         '<li>✓ <span class="mono">' + esc(s.id) + '</span> <span class="sub">' + esc(s.detail) + '</span></li>').join('');
       let html = '<ul class="run-steps">' + steps + '</ul>';
+      let rows = [];
 
       if (!res.ok) {
         html += '<p class="fail-note">Stopped — ' + esc(res.stoppedReason) + '</p>';
       } else {
         html += '<p class="ok-note">Outcome verified (' + esc(res.outcome.expected) + ')</p>';
-        // A "total" scalar (e.g. Total_Records) captions the records table
-        // instead of rendering as its own line.
-        const total = res.extracted && !Array.isArray(res.extracted.total?.sample) ? res.extracted.total : undefined;
+        const total = res.extracted?.total;
         for (const [name, v] of Object.entries(res.extracted ?? {})) {
-          if (name === 'total' && total !== undefined) continue;
-          if (v && typeof v === 'object' && Array.isArray(v.sample)) {
-            const cols = Object.keys(v.sample[0] ?? {}).slice(0, 5);
-            html += '<p class="sub" style="margin-top:10px">' + esc(name) + ': showing ' + v.sample.length +
-              ' of ' + esc(total ?? v.count) + '</p>' +
-              '<div class="table-wrap"><table><thead><tr>' +
-              cols.map((c) => '<th>' + esc(c) + '</th>').join('') +
-              '</tr></thead><tbody>' +
-              v.sample.map((row) => '<tr>' + cols.map((c) =>
-                '<td class="sub">' + esc(String(row[c] ?? '').slice(0, 60)) + '</td>').join('') + '</tr>').join('') +
-              '</tbody></table></div>';
+          if (name === 'total') continue;
+          if (v && typeof v === 'object' && Array.isArray(v.rows)) {
+            rows = v.rows;
+            html += rowsTable(rows, name + ': showing ' + Math.min(10, rows.length) + ' of ' + (total ?? v.count));
           } else {
             html += '<p class="sub" style="margin-top:6px">' + esc(name) + ': <span class="mono">' + esc(v) + '</span></p>';
           }
         }
       }
       out.innerHTML = html;
+      if (rows.length) out.append(exportButtons(rows, base));
+    }
+
+    const btn = document.getElementById('run-btn');
+    const out = document.getElementById('run-out');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      out.innerHTML = '<p class="sub" style="margin-top:10px">Running — executing the generated steps…</p>';
+      const values = Object.fromEntries(params.map((p) => [p, document.getElementById('param-' + p).value.trim()]));
+      try {
+        renderResult(await runOnce(values), out, 'run-' + Object.values(values)[0]);
+      } catch (e) {
+        out.innerHTML = '<p class="fail-note">Could not reach the local backend: ' + esc(e.message) + '</p>';
+      }
+      btn.disabled = false;
+    });
+
+    const bulkBtn = document.getElementById('bulk-btn');
+    if (bulkBtn) bulkBtn.addEventListener('click', async () => {
+      const status = document.getElementById('bulk-status');
+      const bulkOut = document.getElementById('bulk-out');
+      const values = document.getElementById('bulk-values').value
+        .split('\\n').map((v) => v.trim()).filter(Boolean).slice(0, 50);
+      if (!values.length) { status.textContent = 'Nothing to run.'; return; }
+      bulkBtn.disabled = true;
+      bulkOut.innerHTML = '';
+      const aggregated = [];
+      const perRow = [];
+      let failed = 0;
+      for (let i = 0; i < values.length; i++) {
+        status.textContent = 'Running ' + (i + 1) + ' of ' + values.length + ': ' + values[i];
+        try {
+          const res = await runOnce({ [params[0]]: values[i] });
+          const rows = res.ok ? (res.extracted?.records?.rows ?? []) : [];
+          if (res.ok) {
+            for (const row of rows) aggregated.push({ input: values[i], ...row });
+            perRow.push('<li>✓ <span class="mono">' + esc(values[i]) + '</span> <span class="sub">' + rows.length + ' rows</span></li>');
+          } else {
+            failed++;
+            perRow.push('<li>✗ <span class="mono">' + esc(values[i]) + '</span> <span class="sub">' + esc(res.stoppedReason) + '</span></li>');
+          }
+        } catch (e) {
+          failed++;
+          perRow.push('<li>✗ <span class="mono">' + esc(values[i]) + '</span> <span class="sub">' + esc(e.message) + '</span></li>');
+        }
+        bulkOut.innerHTML = '<ul class="run-steps">' + perRow.join('') + '</ul>';
+        if (i < values.length - 1) await new Promise((r) => setTimeout(r, 500));
+      }
+      status.textContent = 'Done: ' + values.length + ' inputs, ' + aggregated.length + ' rows' + (failed ? ', ' + failed + ' failed' : '');
+      if (aggregated.length) {
+        bulkOut.innerHTML += rowsTable(aggregated, 'aggregated: showing ' + Math.min(10, aggregated.length) + ' of ' + aggregated.length);
+        bulkOut.append(exportButtons(aggregated, 'bulk-export'));
+      }
+      bulkBtn.disabled = false;
     });
   })();
   </script>`;

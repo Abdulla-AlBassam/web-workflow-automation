@@ -117,12 +117,24 @@ app.post('/api/sessions/:id/spec', async (req, reply) => {
   }
 });
 
+// Tokens are cached per origin so bulk runs pay the browser-launch cost once,
+// not per row. Sijilat's anonymous token lives much longer than ten minutes.
+const tokenCache = new Map<string, { raw: string; at: number }>();
+async function cachedReadToken(loadUrl: string, readToken: string): Promise<string | undefined> {
+  const key = `${loadUrl}|${readToken}`;
+  const hit = tokenCache.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.raw;
+  const raw = await readTokenViaBrowser(loadUrl, readToken);
+  if (raw) tokenCache.set(key, { raw, at: Date.now() });
+  return raw;
+}
+
 app.post('/api/sessions/:id/run', async (req, reply) => {
   const { id } = req.params as { id: string };
   const spec = getSpec(id) as Parameters<typeof run>[0] | undefined;
   if (!spec) return reply.code(404).send({ error: 'no spec for this session' });
   const { params } = (req.body ?? {}) as { params?: Record<string, string> };
-  return run(spec, params ?? {}, { readToken: readTokenViaBrowser });
+  return run(spec, params ?? {}, { readToken: cachedReadToken });
 });
 
 app.get('/', async (_req, reply) => {

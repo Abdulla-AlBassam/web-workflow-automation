@@ -18,6 +18,15 @@ function resolvePath(obj: unknown, path: string): unknown {
   return path.split('.').reduce<unknown>((n, k) => (n && typeof n === 'object' ? (n as any)[k] : undefined), obj);
 }
 
+function setPath(obj: unknown, path: string, value: unknown) {
+  const keys = path.split('.');
+  const parent = keys.slice(0, -1).reduce<unknown>((n, k) => (n && typeof n === 'object' ? (n as any)[k] : undefined), obj);
+  if (parent && typeof parent === 'object') (parent as any)[keys.at(-1)!] = value;
+}
+
+const PAGE_DELAY_MS = 400;
+const MAX_PAGES = 50;
+
 function substitute(template: unknown, params: Record<string, string>): unknown {
   if (Array.isArray(template)) return template.map((v) => substitute(v, params));
   if (template && typeof template === 'object') {
@@ -42,6 +51,7 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
   }
 
   let finalResponse: { httpStatus: number; body: unknown } | undefined;
+  let outcomeRequest: { url: string; method: string; headers: Record<string, string>; body: unknown } | undefined;
 
   for (const step of spec.steps) {
     if (step.type === 'browser-token') {
@@ -80,6 +90,7 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
       let parsed: unknown;
       try { parsed = JSON.parse(text); } catch { parsed = text; }
       finalResponse = { httpStatus: res.status, body: parsed };
+      outcomeRequest = { url: step.url, method: step.method, headers, body };
       steps.push({ id: step.id, type: step.type, detail: `${step.method} → HTTP ${res.status}` });
     }
   }
@@ -104,9 +115,39 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
   const extracted: Record<string, unknown> = {};
   for (const [name, path] of Object.entries(extract)) {
     const v = resolvePath(finalResponse.body, path);
-    // Arrays are summarised with a small sample so the UI can show real rows
-    // without shipping the whole record set around.
-    extracted[name] = Array.isArray(v) ? { count: v.length, sample: v.slice(0, 10) } : v;
+    extracted[name] = Array.isArray(v) ? { count: v.length, rows: v } : v;
+  }
+
+  // Fetch the remaining pages when the spec says the outcome is page-based.
+  const pg = spec.outcome.pagination;
+  const records = extracted.records as { count: number; rows: unknown[] } | undefined;
+  const total = Number(extracted.total);
+  if (pg && outcomeRequest && records && !Number.isNaN(total) && records.rows.length > 0 && total > records.rows.length) {
+    const all = [...records.rows];
+    let page = Number(resolvePath(outcomeRequest.body, pg.pagePath)) || 1;
+    while (all.length < total && page < MAX_PAGES) {
+      page++;
+      await new Promise((r) => setTimeout(r, PAGE_DELAY_MS));
+      setPath(outcomeRequest.body, pg.pagePath, page);
+      let res: Response;
+      try {
+        res = await fetch(outcomeRequest.url, {
+          method: outcomeRequest.method, headers: outcomeRequest.headers, body: JSON.stringify(outcomeRequest.body),
+        });
+      } catch (e) {
+        return { ok: false, stoppedReason: `pagination failed at page ${page}: ${(e as Error).message}`, steps };
+      }
+      const body = await res.json().catch(() => undefined);
+      const pageOk = expect.path === '__http_ok' ? res.ok : String(resolvePath(body, expect.path)) === expect.equals;
+      if (!pageOk) {
+        return { ok: false, stoppedReason: `pagination failed at page ${page}: outcome check no longer matched (HTTP ${res.status})`, steps };
+      }
+      const rows = resolvePath(body, extract.records) as unknown[] | undefined;
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      all.push(...rows);
+    }
+    extracted.records = { count: all.length, rows: all };
+    steps.push({ id: 'paginate', type: 'pagination', detail: `fetched ${page} pages, ${all.length} of ${total} rows` });
   }
 
   return { ok: true, steps, outcome: { expected: `${expect.path}=${expect.equals}`, actual, matched }, extracted };

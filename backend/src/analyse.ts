@@ -45,7 +45,7 @@ function parseBody(body: string | undefined): unknown {
 }
 
 // Every leaf path in an object, so correlation reports where a value landed.
-function* leaves(node: unknown, path = ''): Generator<{ path: string; value: unknown }> {
+export function* leaves(node: unknown, path = ''): Generator<{ path: string; value: unknown }> {
   if (node !== null && typeof node === 'object') {
     for (const [k, v] of Object.entries(node)) {
       yield* leaves(v, path ? `${path}.${k}` : k);
