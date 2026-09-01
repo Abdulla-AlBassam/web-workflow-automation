@@ -12,7 +12,7 @@ export type RunResult = {
   extracted?: Record<string, unknown>;
 };
 
-type TokenReader = (loadUrl: string, readToken: string) => Promise<string | undefined>;
+type TokenReader = (loadUrl: string) => Promise<{ bearer: string; source: string } | undefined>;
 
 function resolvePath(obj: unknown, path: string): unknown {
   return path.split('.').reduce<unknown>((n, k) => (n && typeof n === 'object' ? (n as any)[k] : undefined), obj);
@@ -55,23 +55,14 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
 
   for (const step of spec.steps) {
     if (step.type === 'browser-token') {
-      const raw = await deps.readToken(step.loadUrl, step.readToken).catch((e) => {
+      const tok = await deps.readToken(step.loadUrl).catch((e) => {
         throw new Error(`token step: ${e.message}`);
       });
-      if (!raw) {
-        return { ok: false, stoppedReason: `token step "${step.id}": site issued no token at ${step.readToken}`, steps };
+      if (!tok) {
+        return { ok: false, stoppedReason: `token step "${step.id}": site issued no recognisable token after loading ${step.loadUrl}`, steps };
       }
-      let bearer: string;
-      try {
-        bearer = String(resolvePath(JSON.parse(raw), step.bearerPath));
-      } catch {
-        return { ok: false, stoppedReason: `token step "${step.id}": token blob was not the expected JSON`, steps };
-      }
-      if (!bearer || bearer === 'undefined') {
-        return { ok: false, stoppedReason: `token step "${step.id}": no "${step.bearerPath}" in token blob`, steps };
-      }
-      bearers[step.id] = bearer;
-      steps.push({ id: step.id, type: step.type, detail: `token acquired (${bearer.length} chars)` });
+      bearers[step.id] = tok.bearer;
+      steps.push({ id: step.id, type: step.type, detail: `token from ${tok.source} (${tok.bearer.length} chars)` });
     } else {
       // URL placeholders take the parameter URL-encoded; body values go raw.
       const url = step.url.replace(/\{\{(\w+)\}\}/g, (_, n) => encodeURIComponent(params[n] ?? ''));

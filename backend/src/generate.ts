@@ -2,7 +2,7 @@ import { leaves, type Analysis, type Call, type Match } from './analyse.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 4;
+export const SPEC_VERSION = 5;
 
 export type Spec = {
   version: number;
@@ -26,7 +26,9 @@ export type Spec = {
 };
 
 export type Step =
-  | { id: string; type: 'browser-token'; loadUrl: string; readToken: string; bearerPath: string; reason: string }
+  // The token itself is discovered at run time from the site's web storage;
+  // the spec records only where to load from and why the step exists.
+  | { id: string; type: 'browser-token'; loadUrl: string; reason: string }
   // url may contain {{param}} placeholders (URL-encoded at run time); GET
   // workflows have no bodyTemplate at all.
   | { id: string; type: 'request'; method: string; url: string; headers: Record<string, string>; bearerFrom?: string; bodyTemplate?: unknown };
@@ -159,9 +161,7 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
       id: 'token',
       type: 'browser-token',
       loadUrl: opts.loadUrl,
-      readToken: 'localStorage.accessToken',
-      bearerPath: 'access_token',
-      reason: `direct call needs a bearer token (probe returned ${opts.probeStatus ?? analysis.authHint}); the site issues one client-side for anonymous users`,
+      reason: `direct call needs a bearer token (probe returned ${opts.probeStatus ?? analysis.authHint}); the site issues one client-side, read back from its web storage`,
     });
   }
   let url = outcome.url;

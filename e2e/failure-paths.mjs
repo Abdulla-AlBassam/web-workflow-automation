@@ -72,10 +72,17 @@ try {
 
   // 5. A token step that yields no token stops with a named reason (wrong page / auth gone).
   const authSpec = structuredClone(spec);
-  authSpec.steps.unshift({ id: 'token', type: 'browser-token', loadUrl: `${MOCK}/`, readToken: 'localStorage.accessToken', bearerPath: 'access_token', reason: 'test' });
+  authSpec.steps.unshift({ id: 'token', type: 'browser-token', loadUrl: `${MOCK}/`, reason: 'test' });
   authSpec.steps[1].bearerFrom = 'token';
   const noTok = await run(authSpec, { [pname]: '84121' }, { readToken: async () => undefined });
-  check('absent token stops the run', !noTok.ok && /issued no token/.test(noTok.stoppedReason || ''), noTok.stoppedReason);
+  check('absent token stops the run', !noTok.ok && /issued no recognisable token/.test(noTok.stoppedReason || ''), noTok.stoppedReason);
+
+  // 6. A discovered token flows into the run and its origin is reported.
+  const withTok = await run(authSpec, { [pname]: '84121' },
+    { readToken: async () => ({ bearer: 'stub-bearer-value-long-enough', source: 'localStorage.auth → access_token' }) });
+  check('discovered token completes the run and names its source',
+    withTok.ok && withTok.steps.some((s) => s.type === 'browser-token' && /localStorage\.auth/.test(s.detail)),
+    withTok.stoppedReason ?? JSON.stringify(withTok.steps));
 } finally {
   mock.kill();
 }

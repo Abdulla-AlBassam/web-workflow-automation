@@ -6,7 +6,7 @@ import { SPEC_VERSION, toSpec } from './generate.js';
 import { probeAuth } from './probe.js';
 import { renderDetail, renderList } from './views.js';
 import { run } from '../../runner/src/run.js';
-import { readTokenViaBrowser } from '../../runner/src/browser-token.js';
+import { readBearerViaBrowser, type Bearer } from '../../runner/src/browser-token.js';
 
 const app = Fastify({ logger: { level: 'warn' } });
 
@@ -128,14 +128,13 @@ app.post('/api/sessions/:id/spec', async (req, reply) => {
 
 // Tokens are cached per origin so bulk runs pay the browser-launch cost once,
 // not per row. Sijilat's anonymous token lives much longer than ten minutes.
-const tokenCache = new Map<string, { raw: string; at: number }>();
-async function cachedReadToken(loadUrl: string, readToken: string): Promise<string | undefined> {
-  const key = `${loadUrl}|${readToken}`;
-  const hit = tokenCache.get(key);
-  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.raw;
-  const raw = await readTokenViaBrowser(loadUrl, readToken);
-  if (raw) tokenCache.set(key, { raw, at: Date.now() });
-  return raw;
+const tokenCache = new Map<string, { tok: Bearer; at: number }>();
+async function cachedReadToken(loadUrl: string): Promise<Bearer | undefined> {
+  const hit = tokenCache.get(loadUrl);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.tok;
+  const tok = await readBearerViaBrowser(loadUrl);
+  if (tok) tokenCache.set(loadUrl, { tok, at: Date.now() });
+  return tok;
 }
 
 app.post('/api/sessions/:id/run', async (req, reply) => {
