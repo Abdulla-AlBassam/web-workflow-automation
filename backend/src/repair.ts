@@ -257,7 +257,10 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal)
 
   let client: Anthropic;
   try {
-    client = new Anthropic();
+    // Identity-linked API keys refuse requests without the workspace id they
+    // are scoped to; ANTHROPIC_WORKSPACE_ID in .env supplies it.
+    const workspace = process.env.ANTHROPIC_WORKSPACE_ID;
+    client = new Anthropic(workspace ? { defaultHeaders: { 'anthropic-workspace-id': workspace } } : {});
   } catch (e) {
     emit('error', `no API credentials: ${(e as Error).message}. Put ANTHROPIC_API_KEY=… in the project's .env and restart the backend.`);
     return;
