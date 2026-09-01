@@ -59,6 +59,17 @@ createServer((req, res) => {
     const hits = COMPANIES.filter((c) => c.NAME_EN.toLowerCase().includes(q.toLowerCase()));
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ TOTAL: hits.length, RECORDS: hits }));
+  } else if (req.method === 'GET' && /^\/company\/\d+$/.test(req.url)) {
+    // Server-rendered detail page: the bio exists only in the HTML, never in
+    // a JSON response — the shape that forces a browser-extract step.
+    const id = req.url.split('/').at(-1);
+    const c = COMPANIES.find((x) => x.CR_NO === id);
+    if (!c) { res.writeHead(404).end(); return; }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${c.NAME_EN}</title></head><body>
+      <h1 id="co_name">${c.NAME_EN}</h1>
+      <p id="co_bio">${BIOS[c.CR_NO] ?? ''}</p>
+    </body></html>`);
   } else if (req.method === 'GET' && /^\/api\/company\/\d+$/.test(req.url)) {
     // Chained detail call: the id arrives in the URL path, like a profile page.
     const id = req.url.split('/').at(-1);

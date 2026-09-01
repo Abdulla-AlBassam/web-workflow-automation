@@ -192,6 +192,51 @@ try {
   check('empty search stops the chain with a named reason',
     !chainMiss.ok && /no records at RECORDS/.test(chainMiss.stoppedReason ?? ''), chainMiss.stoppedReason);
 
+  // Server-rendered outcome (the real wwe.com bio shape): the marked bio
+  // exists only in the page HTML, so the spec gains a browser-extract step
+  // that follows the link and reads the marked elements. The name mark ALSO
+  // appears in the search API response — the page must still win.
+  await api('/api/sessions', { session: 'pagex', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/pagex/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'awal', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/CRdetails/AdvanceSearchCR_Paging`, status: 200,
+      reqBody: JSON.stringify({ CR_NAME_EN: 'awal', PAGE: 1 }),
+      resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L' }] }), seq: 3 },
+    { kind: 'action', action: 'click', target: { tag: 'a', text: 'page' }, seq: 4 },
+    { kind: 'nav', url: `${MOCK}/company/139867`, seq: 5 },
+    { kind: 'action', action: 'mark', text: 'Awal Trading Co. W.L.L', target: { id: 'co_name', tag: 'h1', selector: '#co_name' }, seq: 6 },
+    { kind: 'action', action: 'mark', text: awalBio, target: { id: 'co_bio', tag: 'p', selector: '#co_bio' }, seq: 7 },
+    { kind: 'session_stop', seq: 8 },
+  ]});
+  await api('/api/sessions/pagex/stop', {});
+  const pageSpec = await api('/api/sessions/pagex/spec', {});
+  const exStep = pageSpec.steps?.find((s) => s.type === 'browser-extract');
+  check('server-rendered outcome gains a browser-extract step',
+    !!exStep && exStep.url.includes('{{link}}') && exStep.extracts?.length === 2 && exStep.link?.rowsPath === 'RECORDS',
+    JSON.stringify(pageSpec.steps));
+  check('marked page elements become columns',
+    pageSpec.outcome?.fromStep === 'extract' &&
+    pageSpec.outcome.columns?.map((c) => c.name).join(',') === 'co_name,co_bio',
+    JSON.stringify(pageSpec.outcome));
+  const pageRun = await api('/api/sessions/pagex/run', { params: { cr_name_en: 'manama' } });
+  check('browser-extract replay reads a new company page',
+    pageRun.ok &&
+    pageRun.extracted?.records?.rows?.[0]?.co_name === 'Manama Foods B.S.C' &&
+    /cold-storage/.test(pageRun.extracted.records.rows[0].co_bio ?? ''),
+    pageRun.stoppedReason ?? JSON.stringify(pageRun.extracted?.records?.rows));
+
+  // A marked element that no longer exists on the page stops the run with a
+  // named reason instead of returning a hollow row.
+  const pagexSpecPath = join(dataDir, 'pagex', 'spec.json');
+  const px = JSON.parse(readFileSync(pagexSpecPath, 'utf8'));
+  px.steps.find((s) => s.type === 'browser-extract').extracts[1].selector = '#gone';
+  writeFileSync(pagexSpecPath, JSON.stringify(px));
+  const pageMiss = await api('/api/sessions/pagex/run', { params: { cr_name_en: 'manama' } });
+  check('missing marked element stops the run',
+    !pageMiss.ok && /nothing at selector "#gone"/.test(pageMiss.stoppedReason ?? ''), pageMiss.stoppedReason);
+
   // A link living in a nested list that is NOT the record set (the wwe.com
   // group.items shape) still becomes row-relative, not a fixed recorded index.
   await api('/api/sessions', { session: 'nested', hosts: ['127.0.0.1'], startedAt: 1 });

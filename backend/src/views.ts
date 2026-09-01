@@ -132,6 +132,9 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
       + (a.chain
         ? `<p class="sub" style="margin-top:4px">Chained: the value at <span class="mono">${esc(a.chain.linkPath)}</span> in its response feeds <span class="mono">${esc(a.chain.call.method)} ${esc(url(a.chain.call.url))}</span>, the true outcome — the run re-resolves that link for every new input.</p>`
         : '')
+      + (a.pageChain
+        ? `<p class="sub" style="margin-top:4px">Chained to a page: the value at <span class="mono">${esc(a.pageChain.linkPath)}</span> in its response feeds <span class="mono">${esc(url(a.pageChain.url))}</span>, where your marked data is rendered — a browser step reads those elements on every run.</p>`
+        : '')
     : `<p class="note">${esc(a.notes.join(' ') || 'No parameterised outcome call identified.')}</p>`;
 
   const callRows = a.calls.map((c) => `<tr>
@@ -174,9 +177,9 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
 
 function renderSpec(spec: any, session: string, marksCount = 0): string {
   const flow = spec.steps.map((s: any) =>
-    `<span class="step step-${s.type === 'browser-token' ? 'token' : 'request'}">${esc(s.id)}<span class="sub"> · ${esc(s.type)}</span></span>`
+    `<span class="step step-${s.type.startsWith('browser-') ? 'token' : 'request'}">${esc(s.id)}<span class="sub"> · ${esc(s.type)}</span></span>`
   ).join('<span class="arrow">→</span>');
-  const tokenNote = spec.steps.find((s: any) => s.type === 'browser-token');
+  const reasoned = spec.steps.filter((s: any) => s.reason);
   const inputs = spec.parameters.map((p: any) =>
     `<label>${esc(p.name)}<input id="param-${esc(p.name)}" value="${esc(p.example)}" spellcheck="false" autocomplete="off"></label>`
   ).join('');
@@ -184,13 +187,18 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
   return `<div class="card">
     <h2>Generated automation <span class="sub">— best way to reach the outcome</span></h2>
     <div class="flow">${flow}</div>
-    ${tokenNote ? `<p class="note">${esc(tokenNote.reason)}</p>` : '<p class="sub">Pure direct-request automation: no browser step needed.</p>'}
+    ${reasoned.length
+      ? reasoned.map((s: any) => `<p class="note">${esc(s.reason)}</p>`).join('')
+      : '<p class="sub">Pure direct-request automation: no browser step needed.</p>'}
     <p class="sub" style="margin:10px 0 4px">Outcome gate: <span class="mono">${esc(spec.outcome.expect.path)}=${esc(spec.outcome.expect.equals)}</span>. The run stops with a reason if this check fails.</p>
     ${spec.outcome.columns?.length
       ? `<p class="sub" style="margin:4px 0">Columns from your marked selections: ${spec.outcome.columns.map((c: any) => `<span class="mono">${esc(c.name)}</span>`).join(', ')}.</p>`
       : ''}
     ${marksCount && !spec.outcome.columns?.length
       ? '<p class="note" style="margin-top:8px">Your marked text was not found in any captured API response (it may be rendered server-side), so results show all fields instead.</p>'
+      : ''}
+    ${marksCount && spec.outcome.columns?.length && spec.outcome.columns.length < marksCount
+      ? `<p class="note" style="margin-top:8px">Only ${spec.outcome.columns.length} of ${marksCount} marked selections could be located; the rest were not found where the outcome lives.</p>`
       : ''}
     <details class="spec-json"><summary>Show the spec JSON</summary><pre>${esc(JSON.stringify(spec, null, 2))}</pre></details>
   </div>

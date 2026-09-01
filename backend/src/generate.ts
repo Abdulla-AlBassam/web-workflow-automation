@@ -2,7 +2,7 @@ import { leaves, norm, type Analysis, type Call, type Match } from './analyse.js
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 7;
+export const SPEC_VERSION = 8;
 
 export type Spec = {
   version: number;
@@ -29,6 +29,11 @@ export type Step =
   // The token itself is discovered at run time from the site's web storage;
   // the spec records only where to load from and why the step exists.
   | { id: string; type: 'browser-token'; loadUrl: string; reason: string }
+  // Server-rendered outcome: a browser loads the linked page and reads the
+  // operator-marked elements. Carries a reason like every browser step.
+  | { id: string; type: 'browser-extract'; url: string; reason: string;
+      link?: { fromStep: string; rowsPath?: string; path: string; pick: 'best-match'; encoded: boolean };
+      extracts: { name: string; selector: string }[] }
   // url may contain {{param}} placeholders (URL-encoded at run time); GET
   // workflows have no bodyTemplate at all. A step with `link` is chained: its
   // URL's {{link}} placeholder is filled from an earlier step's response — the
@@ -221,6 +226,40 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
         encoded: chain.encoded,
       },
     });
+  }
+
+  // Server-rendered outcome: the marked data lives on a page the search
+  // response links to, so a browser step reads the marked elements from it.
+  const pageChain = analysis.pageChain;
+  if (pageChain) {
+    steps.push({
+      id: 'extract',
+      type: 'browser-extract',
+      url: pageChain.url.split(pageChain.linkToken).join('{{link}}'),
+      reason: 'the marked data is rendered into the page rather than returned by an API; a browser reads the operator-marked elements',
+      link: {
+        fromStep: 'search',
+        ...(pageChain.rowsPath ? { rowsPath: pageChain.rowsPath } : {}),
+        path: pageChain.linkPath,
+        pick: 'best-match',
+        encoded: pageChain.encoded,
+      },
+      extracts: pageChain.extracts.map(({ name, selector }) => ({ name, selector })),
+    });
+    return {
+      version: SPEC_VERSION,
+      name: opts.name,
+      origin: opts.origin,
+      language: analysis.language,
+      parameters: groups.map((g) => ({ name: g.name, example: g.value, required: true })),
+      steps,
+      outcome: {
+        fromStep: 'extract',
+        expect: { path: '__http_ok', equals: 'true' },
+        extract: {},
+        columns: pageChain.extracts.map(({ name }) => ({ name, path: name, scope: 'body' as const })),
+      },
+    };
   }
 
   const extract = extractionPaths(final);

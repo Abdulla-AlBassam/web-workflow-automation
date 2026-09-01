@@ -14,6 +14,9 @@ export type RunResult = {
 };
 
 type TokenReader = (loadUrl: string) => Promise<{ bearer: string; source: string } | undefined>;
+type PageExtractor = (url: string, selectors: string[]) => Promise<{ httpStatus: number; texts: (string | undefined)[] }>;
+
+type Link = { fromStep: string; rowsPath?: string; path: string; pick: 'best-match'; encoded: boolean };
 
 function resolvePath(obj: unknown, path: string): unknown {
   return path.split('.').reduce<unknown>((n, k) => (n && typeof n === 'object' ? (n as any)[k] : undefined), obj);
@@ -60,7 +63,32 @@ function substitute(template: unknown, params: Record<string, string>): unknown 
   return template;
 }
 
-export async function run(spec: Spec, params: Record<string, string>, deps: { readToken: TokenReader }): Promise<RunResult> {
+// Resolve a chained step's {{link}} from the feeding step's fresh response.
+function followLink(
+  stepId: string, url: string, link: Link,
+  responses: Record<string, unknown>, params: Record<string, string>,
+): { url: string; note: string } | { stop: string } {
+  const src = responses[link.fromStep];
+  if (src === undefined) {
+    return { stop: `chain step "${stepId}" links from "${link.fromStep}", which did not run` };
+  }
+  let source: unknown = src;
+  if (link.rowsPath) {
+    const rows = resolvePath(src, link.rowsPath);
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { stop: `chain step "${stepId}": no records at ${link.rowsPath} to follow — the search returned nothing` };
+    }
+    source = pickRow(rows, params);
+  }
+  const linkVal = resolvePath(source, link.path);
+  if (linkVal === undefined || linkVal === null) {
+    return { stop: `chain step "${stepId}": no value at ${link.path} to follow` };
+  }
+  const sub = link.encoded ? encodeURIComponent(String(linkVal)) : String(linkVal);
+  return { url: url.split('{{link}}').join(sub), note: ` (followed ${link.path}=${String(linkVal).slice(0, 40)})` };
+}
+
+export async function run(spec: Spec, params: Record<string, string>, deps: { readToken: TokenReader; extractPage: PageExtractor }): Promise<RunResult> {
   const steps: RunResult['steps'] = [];
   const bearers: Record<string, string> = {};
 
@@ -84,31 +112,37 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
       }
       bearers[step.id] = tok.bearer;
       steps.push({ id: step.id, type: step.type, detail: `token from ${tok.source} (${tok.bearer.length} chars)` });
+    } else if (step.type === 'browser-extract') {
+      let linkNote = '';
+      let pageUrl = step.url;
+      if (step.link) {
+        const followed = followLink(step.id, pageUrl, step.link, responses, params);
+        if ('stop' in followed) return { ok: false, stoppedReason: followed.stop, steps };
+        pageUrl = followed.url;
+        linkNote = followed.note;
+      }
+      const got = await deps.extractPage(pageUrl, step.extracts.map((e) => e.selector)).catch((e) => {
+        throw new Error(`extract step: ${e.message}`);
+      });
+      const missing = step.extracts.find((_, i) => got.texts[i] === undefined);
+      if (missing) {
+        return { ok: false, stoppedReason: `extract step "${step.id}": nothing at selector "${missing.selector}" on ${pageUrl} — the page no longer matches the recording`, steps };
+      }
+      const body = Object.fromEntries(step.extracts.map((e, i) => [e.name, got.texts[i]]));
+      responses[step.id] = body;
+      finalResponse = { httpStatus: got.httpStatus, body };
+      outcomeRequest = undefined; // a page read is never re-issued for pagination
+      steps.push({ id: step.id, type: step.type, detail: `page loaded → HTTP ${got.httpStatus}, ${step.extracts.length} marked element(s) read${linkNote}` });
     } else {
       // Chained step: resolve the link value from the previous step's fresh
       // response before parameter substitution touches the URL.
       let linkNote = '';
       let stepUrl = step.url;
       if (step.link) {
-        const src = responses[step.link.fromStep];
-        if (src === undefined) {
-          return { ok: false, stoppedReason: `chain step "${step.id}" links from "${step.link.fromStep}", which did not run`, steps };
-        }
-        let source: unknown = src;
-        if (step.link.rowsPath) {
-          const rows = resolvePath(src, step.link.rowsPath);
-          if (!Array.isArray(rows) || rows.length === 0) {
-            return { ok: false, stoppedReason: `chain step "${step.id}": no records at ${step.link.rowsPath} to follow — the search returned nothing`, steps };
-          }
-          source = pickRow(rows, params);
-        }
-        const linkVal = resolvePath(source, step.link.path);
-        if (linkVal === undefined || linkVal === null) {
-          return { ok: false, stoppedReason: `chain step "${step.id}": no value at ${step.link.path} to follow`, steps };
-        }
-        const sub = step.link.encoded ? encodeURIComponent(String(linkVal)) : String(linkVal);
-        stepUrl = stepUrl.split('{{link}}').join(sub);
-        linkNote = ` (followed ${step.link.path}=${String(linkVal).slice(0, 40)})`;
+        const followed = followLink(step.id, stepUrl, step.link, responses, params);
+        if ('stop' in followed) return { ok: false, stoppedReason: followed.stop, steps };
+        stepUrl = followed.url;
+        linkNote = followed.note;
       }
       // URL placeholders take the parameter URL-encoded; body values go raw.
       const url = stepUrl.replace(/\{\{(\w+)\}\}/g, (_, n) => encodeURIComponent(params[n] ?? ''));

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { run } from './run.js';
 import { readBearerViaBrowser } from './browser-token.js';
+import { extractPageViaBrowser } from './browser-extract.js';
 
 // Usage: tsx runner/src/cli.ts <spec.json> key=value [key=value ...]
 const [specPath, ...pairs] = process.argv.slice(2);
@@ -16,7 +17,7 @@ const params = Object.fromEntries(pairs.map((p) => {
 }));
 
 console.log(`running "${spec.name}" with ${JSON.stringify(params)}\n`);
-const result = await run(spec, params, { readToken: readBearerViaBrowser });
+const result = await run(spec, params, { readToken: readBearerViaBrowser, extractPage: extractPageViaBrowser });
 
 for (const s of result.steps) console.log(`  ✓ ${s.id} (${s.type}): ${s.detail}`);
 console.log();

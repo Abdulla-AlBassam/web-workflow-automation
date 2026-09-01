@@ -6,7 +6,7 @@ import { leaves } from '../../backend/src/analyse.js';
 // value, or a token-named field inside a stored JSON blob, qualifies; the best
 // match wins and the run reports where it came from. The runner never derives
 // or posts a token itself.
-const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+export const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const JWT = /^eyJ[\w-]+\.[\w-]+\.[\w-]*$/;
 
 export type Bearer = { bearer: string; source: string };

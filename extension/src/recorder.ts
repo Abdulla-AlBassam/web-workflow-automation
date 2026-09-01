@@ -41,15 +41,19 @@ function selector(el: Element): string {
   if (el.id) return `#${el.id}`;
   const parts: string[] = [];
   let cur: Element | null = el;
-  while (cur && cur !== document.body && parts.length < 4) {
+  while (cur && cur !== document.body && parts.length < 8) {
     if (cur.id) { parts.unshift(`#${cur.id}`); break; }
     const tag = cur.tagName.toLowerCase();
+    // A stable-looking class anchors the path far better than bare divs; ids
+    // are rare deep inside templated pages.
+    const cls = Array.from(cur.classList).find((c) => /^[A-Za-z][\w-]{2,40}$/.test(c));
+    const name = cls ? `${tag}.${cls}` : tag;
     const parent: Element | null = cur.parentElement;
     if (parent) {
       const same = Array.from(parent.children).filter((c) => c.tagName === cur!.tagName);
-      parts.unshift(same.length > 1 ? `${tag}:nth-of-type(${same.indexOf(cur) + 1})` : tag);
+      parts.unshift(same.length > 1 ? `${name}:nth-of-type(${same.indexOf(cur) + 1})` : name);
     } else {
-      parts.unshift(tag);
+      parts.unshift(name);
     }
     cur = parent;
   }
@@ -91,9 +95,13 @@ function offerMark() {
   const sel = window.getSelection();
   const text = sel?.toString().replace(/\s+/g, ' ').trim();
   if (!on || !sel || sel.isCollapsed || !text || text.length < 2) return;
-  const rect = sel.getRangeAt(0).getBoundingClientRect();
-  const node = sel.anchorNode;
-  const anchor = node instanceof Element ? node : node?.parentElement;
+  const range = sel.getRangeAt(0);
+  const rect = range.getBoundingClientRect();
+  // The common ancestor, not the anchor: a drag across several paragraphs
+  // marks their container, whose selector generalises across pages far better
+  // than "the 11th paragraph".
+  const node = range.commonAncestorContainer;
+  const anchor = node instanceof Element ? node : node.parentElement;
   chip = document.createElement('button');
   chip.dataset.wfr = 'chip';
   chip.textContent = 'Mark data';

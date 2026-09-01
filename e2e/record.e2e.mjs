@@ -111,6 +111,9 @@ try {
   check('marked selection captured', events.some(
     (e) => e.kind === 'action' && e.action === 'mark' && e.text === 'Awal Trading Co. W.L.L'),
     JSON.stringify(events.filter((e) => e.action === 'mark')));
+  check('mark carries its element selector (feeds browser-extract)', events.some(
+    (e) => e.kind === 'action' && e.action === 'mark' && e.target?.selector === '#bio_text'),
+    JSON.stringify(events.filter((e) => e.action === 'mark').map((e) => e.target)));
 
   const net = events.find((e) => e.kind === 'net' && e.url?.includes('AdvanceSearchCR_Paging'));
   check('search API call captured', !!net);

@@ -33,6 +33,18 @@ export type Chain = {
   encoded: boolean;      // whether the URL carried it percent-encoded
 };
 
+// A chained workflow whose outcome is rendered server-side into a page rather
+// than returned by an API: the search response links to the page the operator
+// navigated to, and the marked elements (with their selectors) live on it.
+export type PageChain = {
+  url: string;           // the visited page, before templating
+  linkPath: string;
+  rowsPath?: string;
+  linkToken: string;
+  encoded: boolean;
+  extracts: { name: string; selector: string; text: string }[];
+};
+
 export type Analysis = {
   session: string;
   status: string;
@@ -42,6 +54,7 @@ export type Analysis = {
   calls: Call[];
   outcome?: Call;
   chain?: Chain;
+  pageChain?: PageChain;
   authHint?: string;
   notes: string[];
 };
@@ -133,39 +146,78 @@ export function responseHasMark(resBody: string | undefined, mark: string): bool
 }
 
 // The same trick as input correlation, one level deeper: a value from call A's
-// response appearing in call B's URL is the click that connected them.
-function findLink(a: Call, b: Call): Omit<Chain, 'call'> | undefined {
+// response appearing in a later URL (an API call's or a visited page's) is the
+// click that connected them.
+function findLink(a: Call, targetUrl: string): Omit<Chain, 'call'> | undefined {
   const parsed = parseBody(a.resBody);
   if (parsed === undefined || parsed === null || typeof parsed !== 'object') return undefined;
-  let best: (Omit<Chain, 'call'> & { len: number }) | undefined;
-  for (const { path, value } of leaves(parsed)) {
-    if (typeof value !== 'string' && typeof value !== 'number') continue;
-    const s = String(value);
-    if (s.length < 4) continue;
-    if (a.url.includes(s)) continue; // shared constants (hosts, base paths) are not links
-    for (const [token, encoded] of [[s, false], [encodeURIComponent(s), true]] as const) {
-      if (encoded && token === s) break;
-      if (!b.url.includes(token)) continue;
-      if (!best || s.length > best.len) {
-        // A link inside any list becomes row-relative at the innermost index,
-        // so the runner picks the matching row per input instead of replaying
-        // the recorded position.
-        let linkPath = path;
-        let rowsPath: string | undefined;
-        const segs = path.split('.');
-        for (let i = segs.length - 2; i > 0; i--) {
-          if (/^\d+$/.test(segs[i])) {
-            rowsPath = segs.slice(0, i).join('.');
-            linkPath = segs.slice(i + 1).join('.');
-            break;
-          }
-        }
-        best = { linkPath, rowsPath, linkToken: token, encoded, len: s.length };
+  let u: URL;
+  try { u = new URL(targetUrl); } catch { return undefined; }
+
+  // Candidate tokens come from the URL itself, and a response value must equal
+  // one exactly. Substring matching invites false links ("superstar" hiding
+  // inside "/superstars/cmpunk"); whole segments cannot. Most specific first:
+  // single path segments right to left, then path suffixes, then query values.
+  const segs = u.pathname.split('/').filter(Boolean);
+  const candidates: string[] = [];
+  for (let i = segs.length - 1; i >= 0; i--) candidates.push(segs[i]);
+  for (let i = segs.length - 2; i >= 0; i--) {
+    candidates.push(segs.slice(i).join('/'), '/' + segs.slice(i).join('/'));
+  }
+  for (const v of u.searchParams.values()) if (v) candidates.push(v);
+
+  // A link inside any list becomes row-relative at the innermost index, so
+  // the runner picks the matching row per input instead of replaying the
+  // recorded position.
+  const relativise = (path: string) => {
+    let linkPath = path;
+    let rowsPath: string | undefined;
+    const parts = path.split('.');
+    for (let i = parts.length - 2; i > 0; i--) {
+      if (/^\d+$/.test(parts[i])) {
+        rowsPath = parts.slice(0, i).join('.');
+        linkPath = parts.slice(i + 1).join('.');
+        break;
       }
-      break;
+    }
+    return { linkPath, rowsPath };
+  };
+
+  for (const token of candidates) {
+    if (token.length < 4) continue;
+    if (a.url.includes(token)) continue; // shared constants (hosts, base paths) are not links
+    const decoded = decodeURIComponent(token);
+    for (const { path, value } of leaves(parsed)) {
+      if (typeof value !== 'string' && typeof value !== 'number') continue;
+      const s = String(value);
+      if (s !== token && s !== decoded) continue;
+      return { ...relativise(path), linkToken: token, encoded: s === decoded && decoded !== token };
     }
   }
-  return best && { linkPath: best.linkPath, rowsPath: best.rowsPath, linkToken: best.linkToken, encoded: best.encoded };
+
+  // Whole-link leaves: many APIs return the destination URL itself, often
+  // messy (double slashes, absolute vs path-only) — compare normalised host
+  // and path. The whole recorded value then substitutes into the URL.
+  const normPath = (p: string) => p.replace(/\/{2,}/g, '/');
+  const targetKey = u.host + normPath(u.pathname);
+  for (const { path, value } of leaves(parsed)) {
+    if (typeof value !== 'string') continue;
+    const s = value.trim();
+    let key: string;
+    let token: string;
+    if (/^https?:\/\//i.test(s)) {
+      try { const lu = new URL(s); key = lu.host + normPath(lu.pathname); } catch { continue; }
+      token = targetUrl; // splicing the whole URL leaves a bare {{link}}
+    } else if (s.startsWith('/')) {
+      key = u.host + normPath(s);
+      token = u.pathname; // keeps the origin as the template's prefix
+    } else {
+      continue;
+    }
+    if (key !== targetKey) continue;
+    return { ...relativise(path), linkToken: token, encoded: false };
+  }
+  return undefined;
 }
 
 function isStructured(resBody: string | undefined): boolean {
@@ -218,7 +270,7 @@ export function analyse(trace: Trace): Analysis {
     for (const b of calls) {
       if (b === outcome || b.seq <= outcome.seq) continue;
       if (b.status < 200 || b.status >= 300 || !isStructured(b.resBody)) continue;
-      const link = findLink(outcome, b);
+      const link = findLink(outcome, b.url);
       if (!link) continue;
       const markHit = marks.some((m) => responseHasMark(b.resBody, m));
       const clickBetween = clickSeqs.some((s) => s > outcome.seq && s < b.seq);
@@ -228,6 +280,40 @@ export function analyse(trace: Trace): Analysis {
         bestScore = score;
         chain = { call: b, ...link };
       }
+    }
+  }
+
+  // Marked data that no API response carries must be rendered server-side.
+  // When the operator navigated to a page the search response links to and
+  // marked text there, that page is the demonstrated outcome: extract the
+  // marked elements from it, and drop any click-only API chain in its favour.
+  let pageChain: PageChain | undefined;
+  const markEvts = events.filter((e) =>
+    e.kind === 'action' && e.action === 'mark' && typeof e.text === 'string' && (e.text as string).trim());
+  if (outcome && markEvts.length) {
+    const unmatched = marks.some((m) => !calls.some((c) => responseHasMark(c.resBody, m)));
+    if (unmatched) {
+      const navs = events.filter((e) =>
+        e.kind === 'nav' && typeof e.url === 'string' && typeof e.seq === 'number' && (e.seq as number) > outcome.seq);
+      for (const nav of navs) {
+        const link = findLink(outcome, nav.url as string);
+        if (!link) continue;
+        const after = markEvts.filter((m) => (m.seq as number) > (nav.seq as number) && (m.target as any)?.selector);
+        if (!after.length) continue;
+        const used = new Set<string>();
+        const extracts = after.map((m) => {
+          const t = (m.target ?? {}) as Record<string, unknown>;
+          const base = String(t.id ?? t.tag ?? 'text').replace(/[^\w]/g, '_') || 'text';
+          let name = base;
+          for (let i = 2; used.has(name); i++) name = `${base}_${i}`;
+          used.add(name);
+          return { name, selector: String(t.selector), text: m.text as string };
+        });
+        // Later qualifying navs win: the page closest to the marks is the one
+        // the operator actually read.
+        pageChain = { url: nav.url as string, ...link, extracts };
+      }
+      if (pageChain) chain = undefined;
     }
   }
 
@@ -241,5 +327,5 @@ export function analyse(trace: Trace): Analysis {
     notes.push(authHint);
   }
 
-  return { session: trace.meta.session, status: trace.meta.status, language, inputs, marks, calls, outcome, chain, authHint, notes };
+  return { session: trace.meta.session, status: trace.meta.status, language, inputs, marks, calls, outcome, chain, pageChain, authHint, notes };
 }

@@ -7,6 +7,7 @@ import { probeAuth } from './probe.js';
 import { renderDetail, renderList } from './views.js';
 import { run } from '../../runner/src/run.js';
 import { readBearerViaBrowser, type Bearer } from '../../runner/src/browser-token.js';
+import { extractPageViaBrowser } from '../../runner/src/browser-extract.js';
 
 const app = Fastify({ logger: { level: 'warn' } });
 
@@ -144,7 +145,7 @@ app.post('/api/sessions/:id/run', async (req, reply) => {
   const spec = (await freshSpec(id)) as Parameters<typeof run>[0] | undefined;
   if (!spec) return reply.code(404).send({ error: 'no spec for this session' });
   const { params } = (req.body ?? {}) as { params?: Record<string, string> };
-  return run(spec, params ?? {}, { readToken: cachedReadToken });
+  return run(spec, params ?? {}, { readToken: cachedReadToken, extractPage: extractPageViaBrowser });
 });
 
 app.get('/', async (_req, reply) => {

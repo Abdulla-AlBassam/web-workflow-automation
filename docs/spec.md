@@ -32,6 +32,16 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
       "bodyTemplate": { /* recorded request body with correlated values replaced by {{query}} */ }
     },
     {
+      "id": "extract",                  // server-rendered outcomes only
+      "type": "browser-extract",        // browser step: load the linked page, read marked elements
+      "url": "https://www.example.com/superstars/{{link}}",
+      "reason": "the marked data is rendered into the page rather than returned by an API",
+      "link": { "fromStep": "search", "rowsPath": "items", "path": "url", "pick": "best-match", "encoded": false },
+      "extracts": [
+        { "name": "h3", "selector": "div.bio > h3" }   // from the operator's marked selections
+      ]
+    },
+    {
       "id": "detail",                   // present only for chained workflows
       "type": "request",
       "method": "GET",

@@ -20,7 +20,7 @@
   <input id="secret" name="secret" type="password" />
   <button id="btn_search" type="button">Search</button>
   <table id="results" hidden>
-    <thead><tr><th>CR No.</th><th>Name</th><th>Status</th></tr></thead>
+    <thead><tr><th>CR No.</th><th>Name</th><th>Status</th><th>Page</th></tr></thead>
     <tbody></tbody>
   </table>
   <div id="bio" hidden>
@@ -43,7 +43,7 @@
       tbody.innerHTML = '';
       for (const r of data.RECORDS) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${r.CR_NO}</td><td><a href="#" data-cr="${r.CR_NO}">${r.NAME_EN}</a></td><td>${r.STATUS}</td>`;
+        tr.innerHTML = `<td>${r.CR_NO}</td><td><a href="#" data-cr="${r.CR_NO}">${r.NAME_EN}</a></td><td>${r.STATUS}</td><td><a href="/company/${r.CR_NO}">page</a></td>`;
         tbody.appendChild(tr);
       }
       document.getElementById('results').hidden = false;
