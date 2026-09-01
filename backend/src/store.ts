@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 export type Meta = {
   session: string;
+  name?: string;
   hosts: string[];
   startedAt: number;
   stoppedAt?: number;

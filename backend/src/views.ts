@@ -18,10 +18,9 @@ td { padding:8px; border-bottom:1px solid var(--border); vertical-align:top; }
 tr:last-child td { border-bottom:none; }
 td.num, .num { font-variant-numeric:tabular-nums; }
 code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; }
-.pill { font-size:12px; padding:2px 8px; border-radius:999px; white-space:nowrap; }
-.pill-complete { background:#E7F3ED; color:var(--ok); }
-.pill-recording { background:#FBEAEA; color:var(--rec); }
-.pill-interrupted { background:#FDF3E3; color:var(--warn); }
+.st { font-size:14px; font-weight:700; cursor:default; }
+.st-complete { color:var(--ok); }
+.st-recording, .st-interrupted { color:var(--rec); }
 .empty { color:var(--muted); text-align:center; padding:24px; }
 .head-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .kv { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:12px; }
@@ -69,10 +68,20 @@ textarea:focus-visible { outline:2px solid var(--accent); outline-offset:2px; bo
 .table-wrap table { width:max-content; min-width:100%; }
 .table-wrap th, .table-wrap td { white-space:nowrap; max-width:320px; overflow:hidden; text-overflow:ellipsis; }
 details.spec-json { margin-top:12px; } details.spec-json summary { font-size:12px; color:var(--muted); cursor:pointer; }
+.head-actions { display:flex; gap:8px; align-items:center; }
+.btn-quiet { background:var(--bg); color:var(--text); font-weight:500; padding:6px 12px; min-height:30px; }
+.btn-quiet:hover:not(:disabled) { background:#E9ECF1; }
+.rename-input { font:inherit; font-size:15px; font-weight:600; border:1px solid var(--border); border-radius:8px; padding:4px 8px; min-width:280px; }
+.rename-input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-color:var(--accent); }
 `;
 
 function esc(s: unknown): string {
   return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+}
+
+const STATUS_GLYPH: Record<string, string> = { complete: '✓', interrupted: '✗', recording: '●' };
+function statusBadge(st: string): string {
+  return `<span class="st st-${esc(st)}" title="${esc(st)}">${STATUS_GLYPH[st] ?? esc(st)}</span>`;
 }
 
 function shell(title: string, body: string): string {
@@ -81,8 +90,8 @@ function shell(title: string, body: string): string {
 
 export function renderList(sessions: (Meta & { st: string })[]): string {
   const rows = sessions.map((m) => `<tr>
-    <td><a href="/session/${esc(m.session)}">${esc(m.session)}</a></td>
-    <td><span class="pill pill-${m.st}">${m.st}</span></td>
+    <td><a href="/session/${esc(m.session)}">${esc(m.name ?? m.session)}</a>${m.name ? `<div class="sub mono">${esc(m.session)}</div>` : ''}</td>
+    <td>${statusBadge(m.st)}</td>
     <td class="num">${m.count}</td>
     <td class="num">${m.dropped}</td>
     <td class="num">${new Date(m.startedAt).toLocaleString('en-GB')}</td>
@@ -147,12 +156,18 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
   const specCard = spec ? renderSpec(spec, meta.session, a.marks.length) : `<div class="card"><h2>Automation</h2>
     <p class="note">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p></div>`;
 
-  return shell(`Session ${meta.session}`, `
+  return shell(`Session ${meta.name ?? meta.session}`, `
     <div class="card">
       <div class="crumb"><a href="/">← all sessions</a></div>
       <div class="head-row">
-        <h1>${esc(meta.session)}</h1>
-        <span class="pill pill-${st}">${st}</span>
+        <div>
+          <h1 id="session-name">${esc(meta.name ?? meta.session)}</h1>
+          ${meta.name ? `<div class="sub mono">${esc(meta.session)}</div>` : ''}
+        </div>
+        <span class="head-actions">
+          <button id="rename-btn" class="btn btn-quiet">Rename</button>
+          ${statusBadge(st)}
+        </span>
       </div>
       <dl class="kv">
         <div class="box"><dt>Events</dt><dd class="num">${meta.count}</dd></div>
@@ -172,7 +187,42 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
       <tbody>${callRows}</tbody></table>
     </div>
 
-    ${specCard}`);
+    ${specCard}
+
+    <script>
+    (() => {
+      const btn = document.getElementById('rename-btn');
+      const wrap = document.getElementById('session-name');
+      const id = ${JSON.stringify(meta.session)};
+      async function save(value) {
+        await fetch('/api/sessions/' + encodeURIComponent(id) + '/name', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: value }),
+        });
+        location.reload();
+      }
+      btn.addEventListener('click', () => {
+        const open = document.getElementById('rename-input');
+        if (open) { save(open.value); return; }
+        const current = wrap.textContent;
+        wrap.innerHTML = '';
+        const input = document.createElement('input');
+        input.id = 'rename-input';
+        input.className = 'rename-input';
+        input.value = current;
+        input.maxLength = 80;
+        wrap.append(input);
+        input.focus();
+        input.select();
+        btn.textContent = 'Save';
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') save(input.value);
+          if (e.key === 'Escape') location.reload();
+        });
+      });
+    })();
+    </script>`);
 }
 
 function renderSpec(spec: any, session: string, marksCount = 0): string {

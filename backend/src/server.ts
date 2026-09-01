@@ -85,6 +85,20 @@ async function freshSpec(id: string) {
   return regenerated ?? saved;
 }
 
+// A finished session doubles as a reusable automation, so the operator can
+// give it a working title. The directory id never changes; links stay stable.
+app.post('/api/sessions/:id/name', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const meta = getMeta(id);
+  if (!meta) return reply.code(404).send({ error: 'unknown session' });
+  const { name } = (req.body ?? {}) as { name?: string };
+  const clean = String(name ?? '').trim().slice(0, 80);
+  if (clean) meta.name = clean;
+  else delete meta.name;
+  saveMeta(meta);
+  return { ok: true, name: meta.name ?? null };
+});
+
 app.get('/api/sessions', async () => listSessions().map((m) => ({ ...m, status: status(m) })));
 
 app.get('/api/sessions/:id/export', async (req, reply) => {

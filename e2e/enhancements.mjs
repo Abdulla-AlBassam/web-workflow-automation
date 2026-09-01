@@ -345,6 +345,19 @@ try {
   check('stale spec regenerated on run', upgraded.ok && upgraded.extracted?.records?.count === 5,
     `count=${upgraded.extracted?.records?.count}`);
   check('regenerated spec persisted', JSON.parse(readFileSync(specPath, 'utf8')).version !== 1);
+
+  // A finished session is a reusable automation, so it can carry an operator-
+  // given title. The id (directory, URLs) never changes.
+  const named = await api('/api/sessions/enh/name', { name: '  Trading Name Search  ' });
+  check('rename trims and saves the title', named.ok && named.name === 'Trading Name Search');
+  const listed = await api('/api/sessions');
+  check('list carries the title alongside the stable id',
+    listed.find((s) => s.session === 'enh')?.name === 'Trading Name Search');
+  const detailHtml = await fetch(`${BACKEND}/session/enh`).then((r) => r.text());
+  check('session page shows the title', detailHtml.includes('Trading Name Search'));
+  const cleared = await api('/api/sessions/enh/name', { name: '' });
+  check('empty rename reverts to the id', cleared.ok && cleared.name === null &&
+    (await api('/api/sessions')).find((s) => s.session === 'enh')?.name === undefined);
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {
