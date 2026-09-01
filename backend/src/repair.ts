@@ -1,16 +1,21 @@
-// LLM repair loop: when a recording refuses to generate an automation, an
+// LLM repair loop: when a recording refuses to generate an automation, or a
+// saved automation returns something other than what the operator marked, an
 // operator-triggered assistant reviews the sanitised trace, proposes one
 // direct call, and the proposal is executed against the recording's own
 // evidence before anything is saved. The LLM proposes; deterministic code
 // validates and assembles the spec. Nothing unverified ever becomes a spec.
 import Anthropic from '@anthropic-ai/sdk';
-import { analyse, norm, type Analysis } from './analyse.js';
-import { SPEC_VERSION, type Spec } from './generate.js';
+import { analyse, leaves, markKey, markMatches, norm, type Analysis } from './analyse.js';
+import { SPEC_VERSION, locateColumns, missingMarks, type Column, type Spec } from './generate.js';
 import { hostAllowed } from './redact.js';
 import { getMeta, getSpec, readEvents, saveMeta, saveSpec, status, type Meta } from './store.js';
 import { UA } from '../../runner/src/browser-token.js';
 
 export type Emit = (kind: string, text: string) => void;
+
+// Refining a saved automation: what the last run returned, as the session
+// page saw it, and the operator's note on what was wrong with it.
+export type RepairInput = { feedback?: string; lastRun?: unknown };
 
 const MODEL = process.env.REPAIR_MODEL ?? 'claude-opus-5';
 const MAX_ROUNDS = 4;
@@ -29,13 +34,15 @@ type Proposal = {
   };
 };
 
-const SYSTEM = `You are the repair assistant inside a local web-workflow automation tool. An operator recorded themselves demonstrating a workflow in a browser, but the deterministic analyser could not generate an automation from the recording. Diagnose why, and when possible propose ONE direct HTTP call that reaches the same outcome, parameterised on the operator's typed input.
+const SYSTEM = `You are the repair assistant inside a local web-workflow automation tool. An operator recorded themselves demonstrating a workflow in a browser. Either the deterministic analyser could not generate an automation from the recording, or it did and the automation's result was not what the operator wanted. Diagnose why, and when possible propose ONE direct HTTP call that reaches the same outcome, parameterised on the operator's typed input.
 
 The runner can execute: a single HTTP GET or POST to a URL that may contain {{param}} placeholders (URL-encoded at run time), with an optional JSON object body whose string values may contain {{param}}. No custom headers, no cookies, no authentication. Your proposal is validated by actually executing it with the recorded input values; it is accepted only if the response is structured JSON carrying the evidence the operator saw.
 
 Rules:
 - The URL host MUST belong to the recording's allowlisted hosts.
 - Prefer endpoints visible in the recording. Metadata-only requests (whose bodies were not captured) are prime candidates: a JSONP request (resourceType "script", callback= parameter) usually becomes plain JSON when the callback parameter is dropped.
+- When the operator marked text while recording, that text is what every run must return. The proposal is accepted only if the response carries each marked selection in a plain field (columns are located by matching the marked text against field values), so ask for plain text rather than HTML where the API offers the choice, and request the fields the marks need.
+- In REFINE mode the session already has an automation, but its result did not match the marked selections or the operator's note. Diagnose the mismatch and propose the corrected call; the same endpoint with different parameters is fine.
 - If no direct call can work from this evidence (nothing was typed, or the outcome exists only in server-rendered HTML with no API), use action "stop" with concrete advice on how to re-record so the deterministic pipeline succeeds.
 
 Reply with ONLY a JSON object, no prose, no code fences:
@@ -86,7 +93,7 @@ function digest(events: Record<string, unknown>[]): string {
 // of things clicked after typing. A valid outcome response must carry one.
 function evidenceStrings(events: Record<string, unknown>[], a: Analysis): string[] {
   const out = new Set<string>();
-  for (const m of a.marks) if (norm(m)) out.add(norm(m).slice(0, 60));
+  for (const m of a.marks) if (markKey(m)) out.add(markKey(m).slice(0, 60));
   for (const e of events) {
     if (e.kind !== 'action' || e.action !== 'click') continue;
     const text = (e.target as { text?: string } | undefined)?.text;
@@ -96,22 +103,59 @@ function evidenceStrings(events: Record<string, unknown>[], a: Analysis): string
   return [...out];
 }
 
-// Locate the result set in a live response: the longest array of objects (or
-// strings) anywhere in the body, its dotted path recorded for extraction.
-function findRows(body: unknown): { path: string; rows: unknown[] } | undefined {
-  let best: { path: string; rows: unknown[] } | undefined;
+const shortMark = (m: string) => `"${markKey(m).slice(0, 60)}"`;
+
+function describeSpec(spec: Spec): string {
+  const steps = spec.steps.map((s) => s.type === 'request'
+    ? `${s.method} ${s.url}${s.bodyTemplate !== undefined ? ` body ${JSON.stringify(s.bodyTemplate).slice(0, 300)}` : ''}`
+    : `${s.type} step`).join(' → ');
+  const cols = spec.outcome.columns?.map((c) => c.name).join(', ');
+  return `${steps}; rows at ${spec.outcome.extract.records ?? 'the whole response'}; ${cols ? `columns ${cols}` : 'no marked columns'}`;
+}
+
+// The page reports the last run in its own words; only its shape is trusted.
+function describeRun(r: unknown): string {
+  const run = (r ?? {}) as { ok?: boolean; stoppedReason?: string; columns?: unknown; rowCount?: unknown; firstRow?: unknown };
+  if (run.ok === false) return `stopped — ${String(run.stoppedReason ?? 'no reason given').slice(0, 300)}`;
+  const cols = !Array.isArray(run.columns) ? 'unknown columns'
+    : run.columns.length ? run.columns.map(String).join(', ').slice(0, 300) : 'no columns';
+  const first = run.firstRow === undefined ? '' : `; first row: ${JSON.stringify(run.firstRow).slice(0, 400)}`;
+  return `${Number(run.rowCount) || 0} row(s) with columns ${cols}${first}`;
+}
+
+// Locate the result set in a live response: every array of objects (or
+// strings) and every id-keyed map of records is a candidate. The one carrying
+// the most marked selections and evidence wins, then the longest — never the
+// first, or a bookkeeping array listed before the records would take it.
+function chooseRows(body: unknown, marks: string[], evidence: string[]): { path: string; rows: unknown[] } | undefined {
+  const candidates: { path: string; rows: unknown[] }[] = [];
+  const isRecord = (x: unknown) => !!x && typeof x === 'object' && !Array.isArray(x)
+    && Object.values(x).some((f) => f === null || typeof f !== 'object');
   const walk = (n: unknown, path: string) => {
     if (Array.isArray(n)) {
-      if (n.length && n.every((x) => x !== null && (typeof x === 'object' || typeof x === 'string'))
-        && (!best || n.length > best.rows.length)) best = { path, rows: n };
+      if (n.length && n.every((x) => x !== null && (typeof x === 'object' || typeof x === 'string'))) candidates.push({ path, rows: n });
       return;
     }
     if (n && typeof n === 'object') {
+      const values = Object.values(n);
+      if (path && values.length && values.every(isRecord)) candidates.push({ path, rows: values });
       for (const [k, v] of Object.entries(n)) walk(v, path ? `${path}.${k}` : k);
     }
   };
   walk(body, '');
-  return best;
+  let best: { path: string; rows: unknown[]; score: number } | undefined;
+  for (const c of candidates) {
+    const text = norm(JSON.stringify(c.rows));
+    let score = evidence.filter((ev) => text.includes(ev)).length;
+    for (const m of marks) {
+      if (c.rows.some((r) => [...leaves(r)].some(({ value }) => markMatches(value, m)))) score++;
+    }
+    if (!best || score > best.score || (score === best.score && c.rows.length > best.rows.length)) best = { ...c, score };
+  }
+  // Evidence present but inside no candidate: the response is one record
+  // (a summary, a detail) and a stray map of URLs must not pose as its rows.
+  if (best && best.score === 0 && (marks.length || evidence.length)) return undefined;
+  return best && { path: best.path, rows: best.rows };
 }
 
 function substituteUrl(url: string, values: Record<string, string>): string {
@@ -131,13 +175,12 @@ function substituteBody(node: unknown, values: Record<string, string>): unknown 
   return node;
 }
 
-type TryResult =
-  | { ok: true; rowsPath?: string; rowCount: number; evidenceHit?: string }
-  | { ok: false; reason: string; snippet?: string };
+type Verified = { rowsPath?: string; rowCount: number; evidenceHit?: string; columns?: Column[]; missing: string[] };
+type TryResult = ({ ok: true } & Verified) | { ok: false; reason: string; snippet?: string };
 
 // Execute a proposal with the recorded values. Guard rails: allowlisted hosts
 // only, GET/POST only, no custom headers, one request, no pagination.
-async function tryProposal(call: NonNullable<Proposal['call']>, hosts: string[], evidence: string[], signal: AbortSignal): Promise<TryResult> {
+async function tryProposal(call: NonNullable<Proposal['call']>, hosts: string[], evidence: string[], marks: string[], signal: AbortSignal): Promise<TryResult> {
   if (call.method !== 'GET' && call.method !== 'POST') {
     return { ok: false, reason: `method ${call.method} is not allowed (GET or POST only)` };
   }
@@ -184,11 +227,22 @@ async function tryProposal(call: NonNullable<Proposal['call']>, hosts: string[],
       snippet: text.slice(0, 300),
     };
   }
-  const rows = findRows(parsed);
-  return { ok: true, rowsPath: rows?.path || undefined, rowCount: rows?.rows.length ?? 1, evidenceHit };
+  // What the operator marked is what a run must return: the marks are located
+  // in this very response and become the spec's columns.
+  const missing = missingMarks(parsed, marks);
+  if (marks.length && missing.length === marks.length) {
+    return {
+      ok: false,
+      reason: `response is structured but carries none of the marked selections as a field (${marks.map(shortMark).join(', ')}) — the automation must return what the operator marked`,
+      snippet: text.slice(0, 300),
+    };
+  }
+  const rows = chooseRows(parsed, marks, evidence);
+  const columns = locateColumns(parsed, rows?.path, marks);
+  return { ok: true, rowsPath: rows?.path || undefined, rowCount: rows?.rows.length ?? 1, evidenceHit, columns, missing };
 }
 
-function assembleSpec(call: NonNullable<Proposal['call']>, meta: Meta, a: Analysis, p: Proposal, rowsPath: string | undefined): Spec {
+function assembleSpec(call: NonNullable<Proposal['call']>, meta: Meta, a: Analysis, p: Proposal, v: Verified, mode: 'repair' | 'refine', feedback: string): Spec {
   return {
     version: SPEC_VERSION,
     name: meta.session,
@@ -210,9 +264,10 @@ function assembleSpec(call: NonNullable<Proposal['call']>, meta: Meta, a: Analys
     outcome: {
       fromStep: 'search',
       expect: { path: '__http_ok', equals: 'true' },
-      extract: rowsPath ? { records: rowsPath } : {},
+      extract: v.rowsPath ? { records: v.rowsPath } : {},
+      ...(v.columns ? { columns: v.columns } : {}),
     },
-    repaired: { at: new Date().toISOString(), model: MODEL, diagnosis: p.diagnosis },
+    repaired: { at: new Date().toISOString(), model: MODEL, diagnosis: p.diagnosis, mode, ...(feedback ? { feedback } : {}) },
   };
 }
 
@@ -232,23 +287,41 @@ function parseProposal(text: string): Proposal | { parseError: string } {
   }
 }
 
-export async function repairSession(id: string, emit: Emit, signal: AbortSignal): Promise<void> {
+export async function repairSession(id: string, emit: Emit, signal: AbortSignal, input: RepairInput = {}): Promise<void> {
   const meta = getMeta(id);
   if (!meta) { emit('error', 'unknown session'); return; }
   if (status(meta) !== 'complete') { emit('error', `session is ${status(meta)} — only complete recordings can be repaired`); return; }
-  if (getSpec(id)) { emit('error', 'this session already has an automation'); return; }
+  const existing = getSpec(id) as Spec | undefined;
+  const mode = existing ? 'refine' : 'repair';
+  const feedback = (input.feedback ?? '').trim();
 
   emit('info', 'Reading the recording…');
   const events = readEvents(id);
   const a = analyse({ meta: { session: id, status: 'complete' }, events });
-  emit('info', `Deterministic analysis refused: ${a.notes.join(' ') || 'no parameterised outcome call identified.'}`);
-
+  const marks = a.marks;
   const evidence = evidenceStrings(events, a);
+
+  if (existing) {
+    emit('info', `Refining the saved automation: ${describeSpec(existing)}.`);
+    if (input.lastRun !== undefined) emit('info', `Last run returned: ${describeRun(input.lastRun)}`);
+    emit('info', feedback ? `Your note: ${feedback}` : 'No note given — comparing your marked selections with what the run returned.');
+  } else {
+    emit('info', `Deterministic analysis refused: ${a.notes.join(' ') || 'no parameterised outcome call identified.'}`);
+  }
+  if (marks.length) emit('info', `Marked while recording (${marks.length}): ${marks.map(shortMark).join(', ')}`);
+
   const pack = [
+    ...(existing ? [
+      'Mode: REFINE. The session already has an automation, but its result did not match what the operator wanted.',
+      `Current automation: ${describeSpec(existing)}`,
+      `Last run (what the operator received): ${input.lastRun === undefined ? 'not reported' : describeRun(input.lastRun)}`,
+      `Operator feedback: ${feedback ? `"${feedback}"` : 'none — compare the marked selections with the last run yourself'}`,
+      '',
+    ] : []),
     `Session "${id}". Allowlisted hosts: ${meta.hosts.join(', ')}.`,
     `Analyser notes: ${a.notes.join(' ') || 'none'}`,
     `Typed inputs: ${a.inputs.map((i) => `${i.field}="${i.value}"`).join(', ') || 'NONE'}`,
-    `Marked text: ${a.marks.map((m) => `"${m.slice(0, 80)}"`).join(', ') || 'none'}`,
+    `Marked text (what every run must return, as plain fields): ${marks.map((m) => `"${markKey(m).slice(0, 200)}"`).join(', ') || 'none'}`,
     `Evidence a correct outcome response should carry (normalised): ${evidence.map((e) => `"${e}"`).join(', ') || 'none available'}`,
     '',
     'Recording digest (ordered):',
@@ -265,6 +338,20 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal)
     emit('error', `no API credentials: ${(e as Error).message}. Put ANTHROPIC_API_KEY=… in the project's .env and restart the backend.`);
     return;
   }
+
+  type Attempt = { call: NonNullable<Proposal['call']>; p: Proposal; v: Verified; note?: string };
+  const save = (best: Attempt) => {
+    saveSpec(id, assembleSpec(best.call, meta, a, best.p, best.v, mode, feedback));
+    if (!meta.name && best.p.title) {
+      meta.name = best.p.title.slice(0, 80);
+      saveMeta(meta);
+    }
+    const title = !existing && best.p.title ? ` as "${best.p.title}"` : '';
+    emit('saved', `Automation ${existing ? 'updated' : 'saved'}${title}${best.note ? ` — ${best.note}` : ''}. Run it with any new input — no re-recording needed.`);
+  };
+  // A response carrying some of the marks is worth keeping if nothing better
+  // turns up: the loop asks for the rest first and falls back to it honestly.
+  let partial: Attempt | undefined;
 
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: pack }];
   for (let round = 1; round <= MAX_ROUNDS; round++) {
@@ -301,13 +388,16 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal)
     emit('llm', p.diagnosis);
     if (p.action === 'stop') {
       emit('advice', p.advice ?? 'the model sees no automatable path in this recording');
-      emit('done', 'No automation is possible from this recording. Re-record following the advice above.');
+      if (partial) { save({ ...partial, note: `kept the best verified attempt: ${partial.note}` }); return; }
+      emit('done', existing
+        ? 'No better automation was verified; the saved one is unchanged. Add a note describing the problem and try again, or re-record following the advice above.'
+        : 'No automation is possible from this recording. Re-record following the advice above.');
       return;
     }
 
     const call = p.call!;
     emit('try', `${call.method} ${call.url} — executing with the recorded value(s)…`);
-    const result = await tryProposal(call, meta.hosts, evidence, signal);
+    const result = await tryProposal(call, meta.hosts, evidence, marks, signal);
     if (!result.ok) {
       emit('fail', result.reason + (result.snippet ? ` — response starts: ${result.snippet}` : ''));
       messages.push({ role: 'assistant', content: reply });
@@ -321,15 +411,26 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal)
     }
 
     emit('ok', `verified: structured response, ${result.rowCount} row(s)${result.rowsPath ? ` at ${result.rowsPath}` : ''}` +
-      (result.evidenceHit ? `, carrying the recorded evidence ("${result.evidenceHit}")` : ''));
-    const spec = assembleSpec(call, meta, a, p, result.rowsPath);
-    saveSpec(id, spec);
-    if (!meta.name && p.title) {
-      meta.name = p.title.slice(0, 80);
-      saveMeta(meta);
+      (result.evidenceHit ? `, carrying the recorded evidence ("${result.evidenceHit}")` : '') +
+      (result.columns ? `; columns from your marked selections: ${result.columns.map((c) => c.name).join(', ')}` : ''));
+    if (result.missing.length) {
+      const note = `${marks.length - result.missing.length} of ${marks.length} marked selections located; missing: ${result.missing.map(shortMark).join(', ')}`;
+      if (!partial || partial.v.missing.length > result.missing.length) partial = { call, p, v: result, note };
+      if (round < MAX_ROUNDS) {
+        emit('fail', `${note} — asking for a call whose response also carries the missing selection(s)`);
+        messages.push({ role: 'assistant', content: reply });
+        messages.push({
+          role: 'user',
+          content: `The proposal was executed with the recorded values. The response is structured and carries some of the operator's marked selections, but not: ${result.missing.map(shortMark).join(', ')}. Propose a call whose response also returns the missing marked text as plain field values, or stop with advice if no API can return it.`,
+        });
+        continue;
+      }
     }
-    emit('saved', `Automation saved${p.title ? ` as "${p.title}"` : ''}. Run it with any new input — no re-recording needed.`);
+    save({ call, p, v: result, note: result.missing.length ? `${marks.length - result.missing.length} of ${marks.length} marked selections located` : undefined });
     return;
   }
-  emit('done', `No working automation found after ${MAX_ROUNDS} rounds. The recording may need to be redone.`);
+  if (partial) { save({ ...partial, note: `kept the best verified attempt: ${partial.note}` }); return; }
+  emit('done', existing
+    ? `No better automation was verified after ${MAX_ROUNDS} rounds; the saved one is unchanged.`
+    : `No working automation found after ${MAX_ROUNDS} rounds. The recording may need to be redone.`);
 }

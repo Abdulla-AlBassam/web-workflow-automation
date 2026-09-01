@@ -1,8 +1,8 @@
-import { embeddedTokenRegex, leaves, norm, type Analysis, type Call, type Match } from './analyse.js';
+import { embeddedTokenRegex, leaves, markKey, markMatches, type Analysis, type Call, type Match } from './analyse.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 10;
+export const SPEC_VERSION = 11;
 
 export type Spec = {
   version: number;
@@ -18,16 +18,19 @@ export type Spec = {
     // Present when the operator marked text while recording: each column is
     // where that marked value lives in the outcome response. Row-scoped paths
     // resolve against each record; body-scoped against the whole response.
-    columns?: { name: string; path: string; scope: 'row' | 'body' }[];
+    columns?: Column[];
     // Present when the outcome call is page-based: the runner re-issues it
     // with an incremented page value until the extracted total is reached.
     pagination?: { pagePath: string };
   };
   // Present when the spec came from the LLM repair loop rather than the
   // deterministic generator. Such specs are never auto-regenerated: the
-  // generator would only refuse again.
-  repaired?: { at: string; model: string; diagnosis: string };
+  // generator would only refuse again. Mode "refine" means the loop replaced
+  // an automation whose runs the operator flagged, with their note if given.
+  repaired?: { at: string; model: string; diagnosis: string; mode?: 'repair' | 'refine'; feedback?: string };
 };
+
+export type Column = { name: string; path: string; scope: 'row' | 'body' };
 
 export type Step =
   // The token itself is discovered at run time from the site's web storage;
@@ -136,26 +139,27 @@ function extractionPaths(call: Call): Record<string, string> {
 // Marked text is evidence, not the extraction itself: find where each marked
 // value lives in the outcome response and record its path as a column. Paths
 // inside the record set become row-relative, so a future run yields the same
-// field for every row — the mark generalises beyond the recorded value.
-function markColumns(call: Call, recordsPath: string | undefined, marks: string[]) {
-  let body: unknown;
-  try { body = JSON.parse(call.resBody ?? ''); } catch { return undefined; }
-  const cols: { name: string; path: string; scope: 'row' | 'body' }[] = [];
+// field for every row — the mark generalises beyond the recorded value. An
+// exact hit beats a containing field, and a hit inside the record set beats
+// one elsewhere: an echo of the typed input in a bookkeeping field must not
+// become the column.
+export function locateColumns(body: unknown, recordsPath: string | undefined, marks: string[]): Column[] | undefined {
+  const cols: Column[] = [];
+  const inRows = (path: string) => !!recordsPath && path.startsWith(recordsPath + '.');
   for (const mark of marks) {
-    const m = norm(mark);
-    let hit: { path: string; exact: boolean } | undefined;
+    const m = markKey(mark);
+    let hit: { path: string; rank: number } | undefined;
     for (const { path, value } of leaves(body)) {
-      if (typeof value !== 'string' && typeof value !== 'number') continue;
-      const v = norm(String(value));
-      if (!v) continue;
-      if (v === m) { hit = { path, exact: true }; break; }
-      if (!hit && m.length >= 8 && v.includes(m)) hit = { path, exact: false };
+      if (!markMatches(value, mark)) continue;
+      const rank = (markKey(String(value)) === m ? 2 : 0) + (inRows(path) ? 1 : 0);
+      if (!hit || rank > hit.rank) hit = { path, rank };
     }
     if (!hit) continue;
     let path = hit.path;
     let scope: 'row' | 'body' = 'body';
-    if (recordsPath && path.startsWith(recordsPath + '.')) {
-      path = path.slice(recordsPath.length + 1).replace(/^\d+\.?/, '');
+    if (inRows(path)) {
+      // Drop the row's own index or key: records may be keyed by id.
+      path = path.slice(recordsPath!.length + 1).replace(/^[^.]+\.?/, '');
       scope = 'row';
     }
     if (cols.some((c) => c.path === path && c.scope === scope)) continue;
@@ -165,6 +169,12 @@ function markColumns(call: Call, recordsPath: string | undefined, marks: string[
     cols.push({ name, path, scope });
   }
   return cols.length ? cols : undefined;
+}
+
+// Marked selections no field of the response carries, for honest reporting.
+export function missingMarks(body: unknown, marks: string[]): string[] {
+  const all = [...leaves(body)];
+  return marks.filter((mark) => !all.some(({ value }) => markMatches(value, mark)));
 }
 
 // Page-based outcome: a numeric request field named like "page" plus a total
@@ -316,7 +326,9 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
 
   const extract = extractionPaths(final);
   const pagination = chain ? undefined : detectPagination(final, extract);
-  const columns = markColumns(final, extract.records, analysis.marks);
+  let finalBody: unknown;
+  try { finalBody = JSON.parse(final.resBody ?? ''); } catch { finalBody = undefined; }
+  const columns = finalBody === undefined ? undefined : locateColumns(finalBody, extract.records, analysis.marks);
   return {
     version: SPEC_VERSION,
     name: opts.name,

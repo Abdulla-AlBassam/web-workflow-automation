@@ -28,6 +28,15 @@ function setPath(obj: unknown, path: string, value: unknown) {
   if (parent && typeof parent === 'object') (parent as any)[keys.at(-1)!] = value;
 }
 
+// Records keyed by id rather than listed: every value is an object with at
+// least one scalar field of its own (a wrapper around one such map is not).
+function isRecordMap(v: unknown): v is Record<string, object> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  const values = Object.values(v);
+  return values.length > 0 && values.every((x) => x && typeof x === 'object' && !Array.isArray(x)
+    && Object.values(x).some((f) => f === null || typeof f !== 'object'));
+}
+
 const PAGE_DELAY_MS = 400;
 const MAX_PAGES = 50;
 
@@ -198,7 +207,12 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
   const extracted: Record<string, unknown> = {};
   for (const [name, path] of Object.entries(extract)) {
     const v = resolvePath(finalResponse.body, path);
-    extracted[name] = Array.isArray(v) ? { count: v.length, rows: v } : v;
+    if (name !== 'records') { extracted[name] = v; continue; }
+    // The record set is usually an array; some APIs key records by id
+    // instead, and a single record may sit there bare. A path that resolves
+    // to nothing is an empty result, never the whole response as one record.
+    const rows = Array.isArray(v) ? v : isRecordMap(v) ? Object.values(v) : v && typeof v === 'object' ? [v] : [];
+    extracted.records = { count: rows.length, rows };
   }
 
   // Fetch the remaining pages when the spec says the outcome is page-based.

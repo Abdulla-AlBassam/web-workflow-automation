@@ -178,7 +178,7 @@ When any of these bite, the failure is explicit: the session page or the run
 says what was expected, what was found, and why it stopped. Interrupted
 recordings are reviewable but never become automations.
 
-## When it refuses: the LLM repair assistant
+## When it refuses or gets it wrong: the LLM repair assistant
 
 A recording the deterministic analyser refuses can be handed to an LLM,
 by clicking **Begin LLM repair** on the session page. It is always operator-
@@ -196,6 +196,24 @@ work as usual. Nothing unverified is ever saved, and a repaired spec says so
 on the session page. When no direct call can work, for example nothing was
 typed during the recording, the assistant says so and explains how to
 re-record instead.
+
+What the operator marked is what a run must return. When the recording
+carries marked selections, a proposal is accepted only if its response holds
+them as plain fields: the validator locates each mark in the live response
+(ignoring bracketed reference markers such as `[4]`, which page text has and
+API fields do not), picks the record set by that evidence rather than by
+position, and saves the marks as the spec's columns. A response carrying only
+some of the marks is fed back to the model with the missing ones named; if
+nothing better turns up, the best verified attempt is kept and the console
+says which marks it lacks.
+
+The same loop refines a saved automation. After any run, the session page
+offers **Fix with LLM** with an optional note. The assistant receives the
+current automation, what the last run returned (row count, columns, first
+row) and the note; without a note it compares the marked selections with the
+result itself. A verified replacement is saved over the old spec and the
+provenance line on the page says it was refined, quoting the note. A failed
+attempt leaves the saved automation untouched.
 
 Guard rails on every proposal: hosts limited to the recording's allowlist,
 GET and POST only, no custom headers, no credentials, one validation request

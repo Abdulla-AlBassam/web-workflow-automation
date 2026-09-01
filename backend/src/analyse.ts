@@ -176,15 +176,27 @@ export function norm(s: string): string {
   return s.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+// Marked text is compared to response fields with bracketed reference
+// markers dropped ([4], [a], [citation needed]): page text carries them, API
+// fields do not, and one marker would otherwise defeat a whole-paragraph match.
+export function markKey(mark: string): string {
+  return norm(mark.replace(/\[[^\]]{1,20}\]/g, ''));
+}
+
+// Does a field carry a marked selection? Exactly, or as a substring, or, for
+// a long selection that spilled past one field, by carrying its opening.
+export function markMatches(value: unknown, mark: string): boolean {
+  if (typeof value !== 'string' && typeof value !== 'number') return false;
+  const v = markKey(String(value));
+  const m = markKey(mark);
+  if (!v || !m) return false;
+  return v === m || (m.length >= 8 && v.includes(m)) || (m.length > 80 && v.includes(m.slice(0, 80)));
+}
+
 export function responseHasMark(resBody: string | undefined, mark: string): boolean {
   const parsed = parseBody(resBody);
   if (parsed === undefined || parsed === null || typeof parsed !== 'object') return false;
-  const m = norm(mark);
-  for (const { value } of leaves(parsed)) {
-    if (typeof value !== 'string' && typeof value !== 'number') continue;
-    const v = norm(String(value));
-    if (v === m || (m.length >= 8 && v.includes(m))) return true;
-  }
+  for (const { value } of leaves(parsed)) if (markMatches(value, mark)) return true;
   return false;
 }
 

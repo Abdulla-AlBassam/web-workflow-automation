@@ -81,6 +81,7 @@ details.spec-json { margin-top:12px; } details.spec-json summary { font-size:12p
 .rc-fail, .rc-error { color:#FF8A8A; }
 .rc-ok, .rc-saved { color:#6BD49A; }
 .rc-advice { color:#F2CE72; }
+.fix-block { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); }
 `;
 
 function esc(s: unknown): string {
@@ -173,6 +174,60 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
   </div>`;
 
   return shell(`Session ${meta.name ?? meta.session}`, `
+    <script>
+    // LLM repair: stream the loop's NDJSON lines into a visible console so
+    // the operator watches every diagnosis, proposal, and verification.
+    // Shared by the refusal card and the run panel's fix button.
+    window.streamRepair = async (id, con, after, body) => {
+      con.hidden = false;
+      con.innerHTML = '';
+      after.innerHTML = '';
+      const GLYPH = { info: '· ', llm: '\u2234 ', try: '\u2192 ', fail: '\u2717 ', ok: '\u2713 ', saved: '\u2713 ', advice: '\u261e ', error: '\u2717 ', done: '· ' };
+      const line = (kind, text) => {
+        const d = document.createElement('div');
+        d.className = 'rc-' + kind;
+        d.textContent = (GLYPH[kind] ?? '') + text;
+        con.append(d);
+        con.scrollTop = con.scrollHeight;
+      };
+      let savedOk = false;
+      try {
+        const r = await fetch('/api/sessions/' + encodeURIComponent(id) + '/repair', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body ?? {}),
+        });
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf('\n')) >= 0) {
+            const l = buf.slice(0, i).trim();
+            buf = buf.slice(i + 1);
+            if (!l) continue;
+            const e = JSON.parse(l);
+            line(e.kind, e.text);
+            if (e.kind === 'saved') savedOk = true;
+          }
+        }
+      } catch (e) {
+        line('error', 'stream lost: ' + e.message);
+      }
+      if (savedOk) {
+        const view = document.createElement('button');
+        view.className = 'btn';
+        view.style.marginTop = '10px';
+        view.textContent = 'View & run the automation';
+        view.addEventListener('click', () => location.reload());
+        after.append(view);
+      }
+      return savedOk;
+    };
+    </script>
     <div class="card">
       <div class="crumb"><a href="/">← all sessions</a></div>
       <div class="head-row">
@@ -238,55 +293,10 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
         });
       });
 
-      // LLM repair: stream the loop's NDJSON lines into a visible console so
-      // the operator watches every diagnosis, proposal, and verification.
       const rbtn = document.getElementById('repair-btn');
       if (rbtn) rbtn.addEventListener('click', async () => {
         rbtn.disabled = true;
-        const con = document.getElementById('repair-console');
-        const after = document.getElementById('repair-after');
-        con.hidden = false;
-        con.innerHTML = '';
-        after.innerHTML = '';
-        const GLYPH = { info: '· ', llm: '\\u2234 ', try: '\\u2192 ', fail: '\\u2717 ', ok: '\\u2713 ', saved: '\\u2713 ', advice: '\\u261e ', error: '\\u2717 ', done: '· ' };
-        const line = (kind, text) => {
-          const d = document.createElement('div');
-          d.className = 'rc-' + kind;
-          d.textContent = (GLYPH[kind] ?? '') + text;
-          con.append(d);
-          con.scrollTop = con.scrollHeight;
-        };
-        let savedOk = false;
-        try {
-          const r = await fetch('/api/sessions/' + encodeURIComponent(id) + '/repair', { method: 'POST' });
-          const reader = r.body.getReader();
-          const dec = new TextDecoder();
-          let buf = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            let i;
-            while ((i = buf.indexOf('\\n')) >= 0) {
-              const l = buf.slice(0, i).trim();
-              buf = buf.slice(i + 1);
-              if (!l) continue;
-              const e = JSON.parse(l);
-              line(e.kind, e.text);
-              if (e.kind === 'saved') savedOk = true;
-            }
-          }
-        } catch (e) {
-          line('error', 'stream lost: ' + e.message);
-        }
-        if (savedOk) {
-          const view = document.createElement('button');
-          view.className = 'btn';
-          view.style.marginTop = '10px';
-          view.textContent = 'View & run the automation';
-          view.addEventListener('click', () => location.reload());
-          after.append(view);
-        }
+        await streamRepair(id, document.getElementById('repair-console'), document.getElementById('repair-after'), {});
         rbtn.disabled = false;
       });
     })();
@@ -304,9 +314,11 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
 
   return `<div class="card">
     <h2>Generated automation <span class="sub">— best way to reach the outcome</span></h2>
-    ${spec.repaired
-      ? `<p class="ok-note" style="margin:0 0 12px">Built by the LLM repair assistant (${esc(spec.repaired.model)}) after the deterministic analyser refused: ${esc(spec.repaired.diagnosis)} Verified by executing it against the recording's own evidence before saving.</p>`
-      : ''}
+    ${spec.repaired?.mode === 'refine'
+      ? `<p class="ok-note" style="margin:0 0 12px">Refined by the LLM repair assistant (${esc(spec.repaired.model)}) after a run was flagged${spec.repaired.feedback ? ` ("${esc(spec.repaired.feedback)}")` : ''}: ${esc(spec.repaired.diagnosis)} Verified by executing it against the recording's own evidence before saving.</p>`
+      : spec.repaired
+        ? `<p class="ok-note" style="margin:0 0 12px">Built by the LLM repair assistant (${esc(spec.repaired.model)}) after the deterministic analyser refused: ${esc(spec.repaired.diagnosis)} Verified by executing it against the recording's own evidence before saving.</p>`
+        : ''}
     <div class="flow">${flow}</div>
     ${reasoned.length
       ? reasoned.map((s: any) => `<p class="note">${esc(s.reason)}</p>`).join('')
@@ -329,6 +341,13 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
     <p class="sub" style="margin-bottom:10px">Enter a new value and run. This executes the generated steps, not your recorded clicks.</p>
     <div class="runrow">${inputs}<button id="run-btn" class="btn">Run</button></div>
     <div id="run-out"></div>
+    <div id="fix-block" class="fix-block" hidden>
+      <p class="sub" style="margin-bottom:8px">Not what you wanted? Describe the problem, or leave this blank: the assistant compares what you marked while recording with what this run returned.</p>
+      <textarea id="fix-text" rows="2" placeholder="e.g. I only want the article text, not the other fields"></textarea>
+      <div class="runrow" style="margin-top:8px"><button id="fix-btn" class="btn">Fix with LLM</button><span class="sub">Every proposal is executed and verified against your recording before anything is saved.</span></div>
+      <div id="fix-console" class="repair-console" hidden></div>
+      <div id="fix-after"></div>
+    </div>
   </div>
 
   ${spec.parameters.length === 1 ? `<div class="card">
@@ -450,16 +469,36 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
 
     const btn = document.getElementById('run-btn');
     const out = document.getElementById('run-out');
+    let lastRun;
     btn.addEventListener('click', async () => {
       btn.disabled = true;
       out.innerHTML = '<p class="sub" style="margin-top:10px">Running — executing the generated steps…</p>';
       const values = Object.fromEntries(params.map((p) => [p, document.getElementById('param-' + p).value.trim()]));
       try {
-        renderResult(await runOnce(values), out, 'run-' + Object.values(values)[0]);
+        const res = await runOnce(values);
+        renderResult(res, out, 'run-' + Object.values(values)[0]);
+        // What the operator received, as the table shows it, for the assistant
+        // to compare with the marked selections.
+        const rows = res.ok ? (res.extracted?.records?.rows ?? []) : [];
+        const first = rows.length ? flat(rows[0]) : undefined;
+        lastRun = {
+          params: values, ok: res.ok, stoppedReason: res.stoppedReason, rowCount: rows.length,
+          columns: first ? Object.keys(first) : [],
+          firstRow: first && Object.fromEntries(Object.entries(first).map(([k, v]) => [k, String(v ?? '').slice(0, 120)])),
+        };
+        document.getElementById('fix-block').hidden = false;
       } catch (e) {
         out.innerHTML = '<p class="fail-note">Could not reach the local backend: ' + esc(e.message) + '</p>';
       }
       btn.disabled = false;
+    });
+
+    const fixBtn = document.getElementById('fix-btn');
+    fixBtn.addEventListener('click', async () => {
+      fixBtn.disabled = true;
+      await streamRepair(${JSON.stringify(session)}, document.getElementById('fix-console'), document.getElementById('fix-after'),
+        { feedback: document.getElementById('fix-text').value.trim(), lastRun });
+      fixBtn.disabled = false;
     });
 
     const bulkBtn = document.getElementById('bulk-btn');

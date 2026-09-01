@@ -5,7 +5,7 @@
 // and honours the safety rails. Run: node e2e/repair.e2e.mjs
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -35,6 +35,16 @@ await ensureFree(SITE_PORT);
 
 // Mini-site: /api/suggest is JSONP when callback= is present, plain JSON
 // otherwise — the exact shape that defeated capture on the Wikipedia portal.
+// /api/article mirrors the MediaWiki query API: a bookkeeping array
+// (normalized/redirects) listed before the page records, records as an array
+// (formatversion 2) or an id-keyed map (format=1), and prop=info dropping
+// the extract.
+const ARTICLES = [
+  { pageid: 8569916, ns: 0, title: 'English language', description: 'West Germanic language',
+    extract: 'English is a West Germanic language of the Indo-European language family that emerged in early medieval England and has since become a global lingua franca. The language is named after the Angles, one of the Germanic peoples who migrated to Britain.' },
+  { pageid: 10597, ns: 0, title: 'French language', description: 'Romance language',
+    extract: 'French is a Romance language of the Indo-European family. Like all other Romance languages, French descended from the Vulgar Latin of the Roman Empire.' },
+];
 const COMPANIES = [
   { name: 'Awal Trading Co. W.L.L', cr: '139867' },
   { name: 'Delmon Trading W.L.L', cr: '91230' },
@@ -55,6 +65,30 @@ const site = createServer((req, res) => {
     }
     return;
   }
+  // One record with a map of URLs inside it — the REST summary shape.
+  if (url.pathname.startsWith('/api/summary/')) {
+    const title = decodeURIComponent(url.pathname.slice('/api/summary/'.length)).replace(/_/g, ' ');
+    const page = ARTICLES.find((a) => a.title.toLowerCase() === title.toLowerCase());
+    res.writeHead(page ? 200 : 404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(page
+      ? { type: 'standard', title: page.title, description: page.description, extract: page.extract,
+          content_urls: { desktop: { page: `${SITE}/wiki/x` }, mobile: { page: `${SITE}/m/x` } } }
+      : { type: 'not_found' }));
+    return;
+  }
+  if (url.pathname === '/api/article') {
+    const titles = url.searchParams.get('titles') ?? '';
+    const page = ARTICLES.find((a) => a.title.toLowerCase() === titles.toLowerCase());
+    const query = {};
+    if (page && titles !== page.title) query[/^[a-z]/.test(titles) ? 'normalized' : 'redirects'] = [{ from: titles, to: page.title }];
+    const record = !page ? { ns: 0, title: titles, missing: true }
+      : url.searchParams.get('prop') === 'info' ? { pageid: page.pageid, ns: 0, title: page.title }
+      : page;
+    query.pages = url.searchParams.get('format') === '1' ? { [String(record.pageid ?? -1)]: record } : [record];
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ batchcomplete: true, query }));
+    return;
+  }
   res.writeHead(200, { 'content-type': 'text/html' });
   res.end('<html><body>mini site</body></html>');
 });
@@ -62,6 +96,11 @@ site.listen(SITE_PORT);
 
 // Scripted mock LLM: each POST /v1/messages consumes the next reply.
 const SUGGEST = `${SITE}/api/suggest`;
+const ARTICLE = `${SITE}/api/article`;
+const wikiCall = (extra = '') => ({
+  method: 'GET', url: `${ARTICLE}?titles={{query}}&explaintext=1${extra}`, body: null,
+  params: [{ name: 'query', recordedValue: 'english language' }],
+});
 const scripts = [
   // jsonp session, round 1: realistic mistake — keeps the callback parameter.
   { diagnosis: 'The suggestion endpoint is JSONP; its body was never captured by fetch interception.',
@@ -84,6 +123,31 @@ const scripts = [
   // offhost session, round 2: gives up.
   { diagnosis: 'No allowlisted endpoint returns the data.',
     action: 'stop', advice: 'Re-record on the allowlisted site.' },
+  // wiki session: one round, the article API with plain-text extracts.
+  { diagnosis: 'The typeahead was JSONP and the article was server-rendered; the article API returns the intro as plain text.',
+    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall() },
+  // wikiold session (refine): same corrected call.
+  { diagnosis: 'The saved automation extracted the normalisation echo instead of the page records.',
+    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall() },
+  // wikifv1 session: records keyed by page id.
+  { diagnosis: 'Same API, default format.',
+    action: 'propose', title: 'Wikipedia Article Lookup (v1)', call: wikiCall('&format=1') },
+  // wikipart session: round 1 forgets the extract, round 2 adds it.
+  { diagnosis: 'Page info should be enough.',
+    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall('&prop=info') },
+  { diagnosis: 'The intro text needs the extracts prop.',
+    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall() },
+  // wikistop session: round 1 partial, round 2 gives up — the partial is kept.
+  { diagnosis: 'Page info should be enough.',
+    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall('&prop=info') },
+  { diagnosis: 'No API returns the intro text.',
+    action: 'stop', advice: 'Re-record marking only the title.' },
+  // wikisum session: a single-record summary response.
+  { diagnosis: 'The summary endpoint returns the title and intro directly.',
+    action: 'propose', title: 'Wikipedia Summary', call: { ...wikiCall(), url: `${SITE}/api/summary/{{query}}` } },
+  // jsonp session refined without marks: the model stops, the spec stays.
+  { diagnosis: 'The saved call already returns the clicked result.',
+    action: 'stop', advice: 'Describe what is wrong with the result.' },
 ];
 const llmRequests = [];
 const llm = createServer((req, res) => {
@@ -124,9 +188,35 @@ const jsonpEvents = (session) => [
   { kind: 'session_stop', seq: 7 },
 ];
 
-async function repair(session) {
-  const text = await fetch(`${BACKEND}/api/sessions/${session}/repair`, { method: 'POST' }).then((r) => r.text());
+// The Wikipedia shape: typed input, JSONP typeahead, a click through to a
+// server-rendered article, two marks on it — the title, and an intro
+// paragraph carrying citation markers the API's plain text will not have.
+const INTRO_MARK = 'English is a West Germanic language of the Indo-European language family that emerged in early medieval England and has since become a global lingua franca.[4][5][6] The language is named after the Angles, one of the Germanic peoples who migrated to Britain.';
+const wikiEvents = () => [
+  { kind: 'session_start', seq: 0 },
+  { kind: 'page', url: `${SITE}/`, lang: 'en', seq: 1 },
+  { kind: 'action', action: 'click', target: { tag: 'input', selector: '#searchInput' }, seq: 2 },
+  { kind: 'net_meta', method: 'GET', url: `${SUGGEST}?q=english%20language&callback=cb1`, status: 200, resourceType: 'script', seq: 3 },
+  { kind: 'action', action: 'input', value: 'english language', target: { id: 'searchInput' }, seq: 4 },
+  { kind: 'action', action: 'click', target: { tag: 'a', text: 'English language\n\nWest Germanic language' }, seq: 5 },
+  { kind: 'nav', url: `${SITE}/wiki/English_language`, transition: 'link', seq: 6 },
+  { kind: 'page', url: `${SITE}/wiki/English_language`, lang: 'en', seq: 7 },
+  { kind: 'action', action: 'mark', text: 'English language', target: { selector: '#firstHeading' }, seq: 8 },
+  { kind: 'action', action: 'mark', text: INTRO_MARK, target: { selector: '#mwAQ' }, seq: 9 },
+  { kind: 'session_stop', seq: 10 },
+];
+
+async function repair(session, body) {
+  const text = await fetch(`${BACKEND}/api/sessions/${session}/repair`, body === undefined ? { method: 'POST' } : {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }).then((r) => r.text());
   return text.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+const readSpec = (session) => JSON.parse(readFileSync(join(dataDir, session, 'spec.json'), 'utf8'));
+async function recordWiki(session) {
+  await api('/api/sessions', { session, hosts: ['127.0.0.1'], startedAt: 1 });
+  await api(`/api/sessions/${session}/events`, { items: wikiEvents() });
+  return api(`/api/sessions/${session}/stop`, {});
 }
 const kinds = (lines) => lines.map((l) => l.kind);
 
@@ -192,8 +282,116 @@ try {
   // The digest the model received must carry the metadata-only JSONP request.
   const firstPack = JSON.stringify(llmRequests[0] ?? {});
   check('model was shown the uncaptured JSONP request', firstPack.includes('body NOT captured'));
-  check('re-repair of a repaired session is refused',
-    (await repair('jsonp')).some((l) => l.kind === 'error' && /already has an automation/.test(l.text)));
+
+  // Scenario 4: marks decide the rows and become the columns. The bookkeeping
+  // array (normalized) is listed first and has one entry, like the records;
+  // evidence must pick the records, and the citation-marked paragraph must
+  // still match the plain-text extract.
+  const wikiStop = await recordWiki('wiki');
+  check('wiki recording refuses deterministically', wikiStop.spec === false);
+  const wikiLines = await repair('wiki');
+  const wikiOk = wikiLines.find((l) => l.kind === 'ok');
+  check('wiki: verified in one round with both marked columns',
+    kinds(wikiLines).includes('saved') && /columns from your marked selections: title, extract/.test(wikiOk?.text ?? ''),
+    JSON.stringify(wikiLines));
+  const wikiSpec = readSpec('wiki');
+  check('wiki: rows are the page records, not the normalisation echo',
+    wikiSpec.outcome.extract.records === 'query.pages', wikiSpec.outcome.extract.records);
+  check('wiki: columns are row-scoped title and extract',
+    JSON.stringify(wikiSpec.outcome.columns) === JSON.stringify([
+      { name: 'title', path: 'title', scope: 'row' }, { name: 'extract', path: 'extract', scope: 'row' }]),
+    JSON.stringify(wikiSpec.outcome.columns));
+  const french = await api('/api/sessions/wiki/run', { params: { query: 'French Language' } });
+  const frenchRow = french.extracted?.records?.rows?.[0];
+  check('wiki: a new input returns exactly the marked fields',
+    french.ok && french.extracted.records.rows.length === 1 &&
+    JSON.stringify(Object.keys(frenchRow)) === '["title","extract"]' &&
+    frenchRow.title === 'French language' && frenchRow.extract.startsWith('French is a Romance'),
+    french.stoppedReason ?? JSON.stringify(french.extracted));
+
+  // Scenario 5: refine a saved automation whose extraction was wrong (the
+  // very spec the first live repair produced): the run returns nothing
+  // useful, the operator flags it, the loop replaces it.
+  await recordWiki('wikiold');
+  const wrong = {
+    ...wikiSpec, name: 'wikiold', outcome: { fromStep: 'search', expect: { path: '__http_ok', equals: 'true' }, extract: { records: 'query.normalized' } },
+    repaired: { at: '2026-09-01T21:57:22.687Z', model: 'claude-opus-5', diagnosis: 'JSONP typeahead.' },
+  };
+  writeFileSync(join(dataDir, 'wikiold', 'spec.json'), JSON.stringify(wrong));
+  const wrongRun = await api('/api/sessions/wikiold/run', { params: { query: 'French Language' } });
+  check('a records path the response lacks yields no rows, not the whole body',
+    wrongRun.ok && wrongRun.extracted?.records?.count === 0, JSON.stringify(wrongRun.extracted));
+  const lastRun = { params: { query: 'French Language' }, ok: true, rowCount: 0, columns: [] };
+  const refineLines = await repair('wikiold', { feedback: 'I only want the article text', lastRun });
+  check('refine: console shows the saved automation and the note',
+    refineLines.some((l) => l.kind === 'info' && /Refining the saved automation/.test(l.text)) &&
+    refineLines.some((l) => l.kind === 'info' && /Your note: I only want the article text/.test(l.text)),
+    JSON.stringify(refineLines));
+  check('refine: verified and updated', refineLines.some((l) => l.kind === 'saved' && /Automation updated/.test(l.text)),
+    JSON.stringify(refineLines));
+  const refinePack = llmRequests.map((r) => JSON.stringify(r)).find((r) => r.includes('Mode: REFINE')) ?? '';
+  check('refine: model saw the current automation, the last run and the note',
+    refinePack.includes('query.normalized') && refinePack.includes('0 row(s)') && refinePack.includes('I only want the article text'));
+  const refined = readSpec('wikiold');
+  check('refine: provenance records the mode and the note',
+    refined.repaired?.mode === 'refine' && refined.repaired?.feedback === 'I only want the article text' &&
+    refined.outcome.columns?.length === 2, JSON.stringify(refined.repaired));
+  const refinedRun = await api('/api/sessions/wikiold/run', { params: { query: 'French Language' } });
+  check('refine: the flagged input now returns the marked fields',
+    refinedRun.ok && refinedRun.extracted?.records?.rows?.[0]?.extract?.startsWith('French is a Romance') &&
+    Object.keys(refinedRun.extracted.records.rows[0]).length === 2,
+    refinedRun.stoppedReason ?? JSON.stringify(refinedRun.extracted));
+  const refinedPage = await fetch(`${BACKEND}/session/wikiold`).then((r) => r.text());
+  check('refine: session page shows the refinement provenance', refinedPage.includes('Refined by the LLM repair assistant'));
+
+  // Scenario 6: records keyed by id (MediaWiki format=1) are rows too.
+  await recordWiki('wikifv1');
+  const fv1Lines = await repair('wikifv1');
+  check('id-keyed records: verified as rows', fv1Lines.some((l) => l.kind === 'ok' && /1 row\(s\) at query\.pages/.test(l.text)),
+    JSON.stringify(fv1Lines));
+  const fv1Run = await api('/api/sessions/wikifv1/run', { params: { query: 'french language' } });
+  check('id-keyed records: replay returns the marked fields per record',
+    fv1Run.ok && fv1Run.extracted?.records?.rows?.[0]?.title === 'French language' &&
+    fv1Run.extracted.records.rows[0].extract?.startsWith('French is a Romance'),
+    fv1Run.stoppedReason ?? JSON.stringify(fv1Run.extracted));
+
+  // Scenario 7: a response carrying only some marks is fed back; the next
+  // round completes it.
+  await recordWiki('wikipart');
+  const partLines = await repair('wikipart');
+  check('partial marks: round 1 fed back with the missing selection',
+    partLines.some((l) => l.kind === 'fail' && /1 of 2 marked selections located; missing: "english is a west germanic/.test(l.text)),
+    JSON.stringify(partLines));
+  check('partial marks: round 2 completes both columns',
+    partLines.some((l) => l.kind === 'saved') && readSpec('wikipart').outcome.columns?.length === 2);
+
+  // Scenario 8: the model gives up after a partial hit — the partial is kept.
+  await recordWiki('wikistop');
+  const stopLines = await repair('wikistop');
+  check('partial then stop: best verified attempt kept',
+    stopLines.some((l) => l.kind === 'saved' && /kept the best verified attempt: 1 of 2/.test(l.text)) &&
+    readSpec('wikistop').outcome.columns?.length === 1, JSON.stringify(stopLines));
+
+  // Scenario 9: a single-record response is the record; the URL map inside
+  // it is not the row set.
+  await recordWiki('wikisum');
+  const sumLines = await repair('wikisum');
+  check('single record: verified as one row, no stray rows path',
+    sumLines.some((l) => l.kind === 'ok' && /1 row\(s\), carrying/.test(l.text)) &&
+    JSON.stringify(readSpec('wikisum').outcome.extract) === '{}', JSON.stringify(sumLines));
+  const sumRun = await api('/api/sessions/wikisum/run', { params: { query: 'French language' } });
+  check('single record: replay returns one row with the marked fields',
+    sumRun.ok && sumRun.extracted?.records?.rows?.length === 1 &&
+    JSON.stringify(Object.keys(sumRun.extracted.records.rows[0])) === '["title","extract"]' &&
+    sumRun.extracted.records.rows[0].title === 'French language',
+    sumRun.stoppedReason ?? JSON.stringify(sumRun.extracted));
+
+  // Scenario 10: refining without marks or a better idea leaves the spec alone.
+  const before = readSpec('jsonp');
+  const noBetter = await repair('jsonp', { feedback: 'rows look odd' });
+  check('refine with no better proposal leaves the saved spec unchanged',
+    noBetter.some((l) => l.kind === 'done' && /saved one is unchanged/.test(l.text)) &&
+    JSON.stringify(readSpec('jsonp')) === JSON.stringify(before), JSON.stringify(noBetter));
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

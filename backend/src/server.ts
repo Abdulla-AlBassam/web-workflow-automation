@@ -163,14 +163,19 @@ app.post('/api/sessions/:id/spec', async (req, reply) => {
 app.post('/api/sessions/:id/repair', async (req, reply) => {
   const { id } = req.params as { id: string };
   if (!getMeta(id)) return reply.code(404).send({ error: 'unknown session' });
+  // Refining a saved automation: the page sends what the last run returned
+  // and, optionally, the operator's note on what was wrong with it.
+  const { feedback, lastRun } = (req.body ?? {}) as { feedback?: string; lastRun?: unknown };
   reply.hijack();
   const raw = reply.raw;
   raw.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
   const emit = (kind: string, text: string) => raw.write(JSON.stringify({ kind, text }) + '\n');
+  // The response's close fires when the operator leaves the page mid-loop.
+  // (The request's close fires as soon as its JSON body is consumed.)
   const abort = new AbortController();
-  req.raw.on('close', () => abort.abort());
+  raw.on('close', () => abort.abort());
   try {
-    await repairSession(id, emit, abort.signal);
+    await repairSession(id, emit, abort.signal, { feedback: String(feedback ?? '').slice(0, 2000), lastRun });
   } catch (e) {
     emit('error', (e as Error).message);
   }
