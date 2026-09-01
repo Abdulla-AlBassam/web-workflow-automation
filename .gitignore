@@ -6,3 +6,7 @@ backend/data/
 e2e/.tmp/
 *.log
 .DS_Store
+
+# local working notes, never published
+/CLAUDE.md
+/PROGRESS.md
