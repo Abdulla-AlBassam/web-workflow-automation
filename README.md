@@ -178,6 +178,33 @@ When any of these bite, the failure is explicit: the session page or the run
 says what was expected, what was found, and why it stopped. Interrupted
 recordings are reviewable but never become automations.
 
+## When it refuses: the LLM repair assistant
+
+A recording the deterministic analyser refuses can be handed to an LLM,
+by clicking **Begin LLM repair** on the session page. It is always operator-
+triggered, never automatic. A console on the page shows the loop as it runs:
+the model's diagnosis, each proposed call, and the result of executing it.
+
+The division of labour is strict. The model reads a truncated digest of the
+sanitised trace and proposes one direct HTTP call. Deterministic code then
+executes that proposal with the recorded input values and accepts it only if
+the response is structured JSON carrying evidence the operator actually saw
+while recording (marked text, or the result they clicked). A failed attempt
+is fed back to the model for another round, up to four; a verified one is
+saved as a normal spec, the session is titled, and the Run and Bulk panels
+work as usual. Nothing unverified is ever saved, and a repaired spec says so
+on the session page. When no direct call can work, for example nothing was
+typed during the recording, the assistant says so and explains how to
+re-record instead.
+
+Guard rails on every proposal: hosts limited to the recording's allowlist,
+GET and POST only, no custom headers, no credentials, one validation request
+per round. To enable the assistant, put `ANTHROPIC_API_KEY=...` in a `.env`
+file at the project root (gitignored) and restart the backend; without a key
+the button explains what is missing. Note that using it sends the trace
+digest to the Anthropic API, the only part of the tool that leaves the
+machine.
+
 ## Safeguards
 
 - Network capture is allowlisted per session; third-party traffic is dropped
@@ -208,5 +235,6 @@ npm run e2e                # full record→replay path in real Chromium (backend
 npm run test:failures      # every named stop: interrupted, missing param, changed outcome, absent token
 npm run test:enhancements  # pagination, bulk, URL specs, chains, extraction
 npm run test:matrix        # scenario matrix: seven site shapes recorded end to end in real Chromium
+npm run test:repair        # LLM repair loop against a scripted mock model and a live JSONP mini-site
 npm run typecheck
 ```

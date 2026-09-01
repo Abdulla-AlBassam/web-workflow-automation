@@ -5,7 +5,7 @@ const REQ_CAP = 64 * 1024;
 const RES_CAP = 256 * 1024;
 const FORBIDDEN_KEYS = /cookie|authorization|x-api-key|bearer/i;
 
-function hostAllowed(url: unknown, hosts: string[]): boolean {
+export function hostAllowed(url: unknown, hosts: string[]): boolean {
   if (typeof url !== 'string') return false;
   try {
     const h = new URL(url).hostname;

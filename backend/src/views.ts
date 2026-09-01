@@ -73,6 +73,14 @@ details.spec-json { margin-top:12px; } details.spec-json summary { font-size:12p
 .btn-quiet:hover:not(:disabled) { background:#E9ECF1; }
 .rename-input { font:inherit; font-size:15px; font-weight:600; border:1px solid var(--border); border-radius:8px; padding:4px 8px; min-width:280px; }
 .rename-input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-color:var(--accent); }
+.repair-console { background:#0F1420; color:#E6EDF3; border-radius:8px; padding:12px 14px; margin-top:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; line-height:1.7; max-height:380px; overflow:auto; }
+.repair-console div { white-space:pre-wrap; word-break:break-word; }
+.rc-info, .rc-done { color:#8A93A6; }
+.rc-llm { color:#9EC1FF; }
+.rc-try { color:#E6EDF3; }
+.rc-fail, .rc-error { color:#FF8A8A; }
+.rc-ok, .rc-saved { color:#6BD49A; }
+.rc-advice { color:#F2CE72; }
 `;
 
 function esc(s: unknown): string {
@@ -154,7 +162,15 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
   </tr>`).join('');
 
   const specCard = spec ? renderSpec(spec, meta.session, a.marks.length) : `<div class="card"><h2>Automation</h2>
-    <p class="note">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p></div>`;
+    <p class="note">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p>
+    ${st === 'complete' ? `
+    <div class="runrow" style="margin-top:12px">
+      <button id="repair-btn" class="btn">Begin LLM repair</button>
+      <span class="sub">An LLM reviews the recording and proposes a fix; the fix is executed and verified against the recording's own evidence before anything is saved.</span>
+    </div>
+    <div id="repair-console" class="repair-console" hidden></div>
+    <div id="repair-after"></div>` : ''}
+  </div>`;
 
   return shell(`Session ${meta.name ?? meta.session}`, `
     <div class="card">
@@ -221,6 +237,58 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
           if (e.key === 'Escape') location.reload();
         });
       });
+
+      // LLM repair: stream the loop's NDJSON lines into a visible console so
+      // the operator watches every diagnosis, proposal, and verification.
+      const rbtn = document.getElementById('repair-btn');
+      if (rbtn) rbtn.addEventListener('click', async () => {
+        rbtn.disabled = true;
+        const con = document.getElementById('repair-console');
+        const after = document.getElementById('repair-after');
+        con.hidden = false;
+        con.innerHTML = '';
+        after.innerHTML = '';
+        const GLYPH = { info: '· ', llm: '\\u2234 ', try: '\\u2192 ', fail: '\\u2717 ', ok: '\\u2713 ', saved: '\\u2713 ', advice: '\\u261e ', error: '\\u2717 ', done: '· ' };
+        const line = (kind, text) => {
+          const d = document.createElement('div');
+          d.className = 'rc-' + kind;
+          d.textContent = (GLYPH[kind] ?? '') + text;
+          con.append(d);
+          con.scrollTop = con.scrollHeight;
+        };
+        let savedOk = false;
+        try {
+          const r = await fetch('/api/sessions/' + encodeURIComponent(id) + '/repair', { method: 'POST' });
+          const reader = r.body.getReader();
+          const dec = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let i;
+            while ((i = buf.indexOf('\\n')) >= 0) {
+              const l = buf.slice(0, i).trim();
+              buf = buf.slice(i + 1);
+              if (!l) continue;
+              const e = JSON.parse(l);
+              line(e.kind, e.text);
+              if (e.kind === 'saved') savedOk = true;
+            }
+          }
+        } catch (e) {
+          line('error', 'stream lost: ' + e.message);
+        }
+        if (savedOk) {
+          const view = document.createElement('button');
+          view.className = 'btn';
+          view.style.marginTop = '10px';
+          view.textContent = 'View & run the automation';
+          view.addEventListener('click', () => location.reload());
+          after.append(view);
+        }
+        rbtn.disabled = false;
+      });
     })();
     </script>`);
 }
@@ -236,6 +304,9 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
 
   return `<div class="card">
     <h2>Generated automation <span class="sub">— best way to reach the outcome</span></h2>
+    ${spec.repaired
+      ? `<p class="ok-note" style="margin:0 0 12px">Built by the LLM repair assistant (${esc(spec.repaired.model)}) after the deterministic analyser refused: ${esc(spec.repaired.diagnosis)} Verified by executing it against the recording's own evidence before saving.</p>`
+      : ''}
     <div class="flow">${flow}</div>
     ${reasoned.length
       ? reasoned.map((s: any) => `<p class="note">${esc(s.reason)}</p>`).join('')

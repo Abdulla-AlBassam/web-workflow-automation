@@ -1,5 +1,17 @@
 import Fastify from 'fastify';
+import { existsSync, readFileSync } from 'node:fs';
 import { appendEvents, createSession, getMeta, getSpec, listSessions, readEvents, saveMeta, saveSpec, status } from './store.js';
+import { repairSession } from './repair.js';
+
+// Local secrets (ANTHROPIC_API_KEY for the repair assistant) live in the
+// project's .env, which is gitignored. Environment always wins.
+const envFile = new URL('../../.env', import.meta.url);
+if (existsSync(envFile)) {
+  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
+    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+  }
+}
 import { sanitise } from './redact.js';
 import { analyse } from './analyse.js';
 import { SPEC_VERSION, toSpec } from './generate.js';
@@ -77,9 +89,11 @@ async function autoSpec(id: string) {
 }
 
 // A spec saved by an older generator is regenerated before use, so sessions
-// recorded before a feature (e.g. pagination) still benefit from it.
+// recorded before a feature (e.g. pagination) still benefit from it. Repaired
+// specs are exempt: the deterministic generator would only refuse again.
 async function freshSpec(id: string) {
-  const saved = getSpec(id) as { version?: number } | undefined;
+  const saved = getSpec(id) as { version?: number; repaired?: unknown } | undefined;
+  if (saved?.repaired) return saved;
   if (saved?.version === SPEC_VERSION) return saved;
   const regenerated = await autoSpec(id).catch(() => undefined);
   return regenerated ?? saved;
@@ -141,6 +155,26 @@ app.post('/api/sessions/:id/spec', async (req, reply) => {
   } catch (e) {
     return reply.code(422).send({ error: (e as Error).message });
   }
+});
+
+// Operator-triggered LLM repair. The response is a live NDJSON stream: one
+// {kind, text} line per step, so the session page can show the loop as it
+// runs. Closing the page aborts the loop.
+app.post('/api/sessions/:id/repair', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  if (!getMeta(id)) return reply.code(404).send({ error: 'unknown session' });
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
+  const emit = (kind: string, text: string) => raw.write(JSON.stringify({ kind, text }) + '\n');
+  const abort = new AbortController();
+  req.raw.on('close', () => abort.abort());
+  try {
+    await repairSession(id, emit, abort.signal);
+  } catch (e) {
+    emit('error', (e as Error).message);
+  }
+  raw.end();
 });
 
 // Tokens are cached per origin so bulk runs pay the browser-launch cost once,

@@ -23,6 +23,10 @@ export type Spec = {
     // with an incremented page value until the extracted total is reached.
     pagination?: { pagePath: string };
   };
+  // Present when the spec came from the LLM repair loop rather than the
+  // deterministic generator. Such specs are never auto-regenerated: the
+  // generator would only refuse again.
+  repaired?: { at: string; model: string; diagnosis: string };
 };
 
 export type Step =
