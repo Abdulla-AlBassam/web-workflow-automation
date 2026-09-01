@@ -61,7 +61,16 @@ toggle.addEventListener('click', async () => {
   await refresh();
 });
 
+// Prefill the allowlist from the active tab: the bare domain covers the page
+// and its API subdomains (the matcher treats "x.bh" as including "api.x.bh").
+async function prefillHosts() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.url?.startsWith('http')) return;
+  hostsInput.value = new URL(tab.url).hostname.replace(/^www\./, '');
+}
+
 chrome.storage.session.onChanged.addListener(refresh);
 refresh();
+prefillHosts();
 
 export {};
