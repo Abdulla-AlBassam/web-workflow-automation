@@ -192,6 +192,29 @@ try {
   check('empty search stops the chain with a named reason',
     !chainMiss.ok && /no records at RECORDS/.test(chainMiss.stoppedReason ?? ''), chainMiss.stoppedReason);
 
+  // A link living in a nested list that is NOT the record set (the wwe.com
+  // group.items shape) still becomes row-relative, not a fixed recorded index.
+  await api('/api/sessions', { session: 'nested', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/nested/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'awal', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/CRdetails/AdvanceSearchCR_Paging`, status: 200,
+      reqBody: JSON.stringify({ CR_NAME_EN: 'awal', PAGE: 1 }),
+      resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ NAME_EN: 'Awal Trading Co. W.L.L' }],
+        REFS: { hits: [{ id: '139867' }] } }), seq: 3 },
+    { kind: 'action', action: 'click', target: { tag: 'a' }, seq: 4 },
+    { kind: 'net', method: 'GET', url: `${MOCK}/api/company/139867`, status: 200,
+      resBody: JSON.stringify({ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L', BIO: awalBio }), seq: 5 },
+    { kind: 'action', action: 'mark', text: awalBio, seq: 6 },
+    { kind: 'session_stop', seq: 7 },
+  ]});
+  await api('/api/sessions/nested/stop', {});
+  const nestedSpec = await api('/api/sessions/nested/spec', {});
+  const nestedLink = nestedSpec.steps?.find((s) => s.link)?.link;
+  check('nested-list link is row-relative',
+    nestedLink?.rowsPath === 'REFS.hits' && nestedLink?.path === 'id', JSON.stringify(nestedLink));
+
   // A spec saved by an older generator (no pagination, old version) must be
   // regenerated before use, not executed as-is.
   const specPath = join(dataDir, 'enh', 'spec.json');

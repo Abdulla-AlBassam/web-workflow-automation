@@ -66,6 +66,8 @@ textarea:focus-visible { outline:2px solid var(--accent); outline-offset:2px; bo
 .fail-note { font-size:12px; color:var(--rec); background:#FBEAEA; border-radius:8px; padding:8px 10px; margin-top:10px; }
 .table-wrap { overflow:auto; max-height:440px; margin-top:10px; }
 .table-wrap thead th { position:sticky; top:0; background:var(--surface); }
+.table-wrap table { width:max-content; min-width:100%; }
+.table-wrap th, .table-wrap td { white-space:nowrap; max-width:320px; overflow:hidden; text-overflow:ellipsis; }
 details.spec-json { margin-top:12px; } details.spec-json summary { font-size:12px; color:var(--muted); cursor:pointer; }
 `;
 
@@ -275,7 +277,10 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
     const DISPLAY_CAP = 200;
     function rowsTable(rows, label) {
       rows = rows.map(flat);
-      const cols = Object.keys(rows[0] ?? {}).slice(0, 6);
+      // Every column the export carries, scrollable sideways; cells clip via
+      // CSS ellipsis so one HTML-blob field cannot swamp the table.
+      const cols = [];
+      for (const row of rows) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
       const caption = rows.length <= DISPLAY_CAP
         ? label + ': ' + rows.length + ' rows'
         : label + ': first ' + DISPLAY_CAP + ' of ' + rows.length + ' rows — download for the full set';
@@ -284,7 +289,7 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
         cols.map((c) => '<th>' + esc(c) + '</th>').join('') +
         '</tr></thead><tbody>' +
         rows.slice(0, DISPLAY_CAP).map((row) => '<tr>' + cols.map((c) =>
-          '<td class="sub">' + esc(String(row[c] ?? '').slice(0, 60)) + '</td>').join('') + '</tr>').join('') +
+          '<td class="sub">' + esc(String(row[c] ?? '').slice(0, 300)) + '</td>').join('') + '</tr>').join('') +
         '</tbody></table></div>';
     }
 

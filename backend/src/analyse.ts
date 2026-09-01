@@ -137,7 +137,6 @@ export function responseHasMark(resBody: string | undefined, mark: string): bool
 function findLink(a: Call, b: Call): Omit<Chain, 'call'> | undefined {
   const parsed = parseBody(a.resBody);
   if (parsed === undefined || parsed === null || typeof parsed !== 'object') return undefined;
-  const recordsPath = a.resultShape?.match(/at ([\w.]+)$/)?.[1];
   let best: (Omit<Chain, 'call'> & { len: number }) | undefined;
   for (const { path, value } of leaves(parsed)) {
     if (typeof value !== 'string' && typeof value !== 'number') continue;
@@ -148,11 +147,18 @@ function findLink(a: Call, b: Call): Omit<Chain, 'call'> | undefined {
       if (encoded && token === s) break;
       if (!b.url.includes(token)) continue;
       if (!best || s.length > best.len) {
+        // A link inside any list becomes row-relative at the innermost index,
+        // so the runner picks the matching row per input instead of replaying
+        // the recorded position.
         let linkPath = path;
         let rowsPath: string | undefined;
-        if (recordsPath && path.startsWith(recordsPath + '.')) {
-          rowsPath = recordsPath;
-          linkPath = path.slice(recordsPath.length + 1).replace(/^\d+\.?/, '');
+        const segs = path.split('.');
+        for (let i = segs.length - 2; i > 0; i--) {
+          if (/^\d+$/.test(segs[i])) {
+            rowsPath = segs.slice(0, i).join('.');
+            linkPath = segs.slice(i + 1).join('.');
+            break;
+          }
         }
         best = { linkPath, rowsPath, linkToken: token, encoded, len: s.length };
       }

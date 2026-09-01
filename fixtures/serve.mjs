@@ -7,14 +7,17 @@ import { join } from 'node:path';
 
 const PORT = Number(process.env.PORT ?? 4980);
 
+// Rich rows on purpose: wide tables exercise the horizontal-scroll display,
+// and LOGO_HTML proves markup-blob fields clip instead of swamping a cell.
+const logo = (name) => `<picture><source srcset="/logos/${name}.webp" type="image/webp"/><img src="/logos/${name}.png" alt="${name} logo" width="64" height="64" loading="lazy"/></picture>`;
 const COMPANIES = [
-  { CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L', NAME_AR: 'شركة أوال التجارية', STATUS: 'ACTIVE', TYPE: 'WLL' },
-  { CR_NO: '84121', NAME_EN: 'Manama Foods B.S.C', NAME_AR: 'المنامة للأغذية', STATUS: 'ACTIVE', TYPE: 'BSC' },
-  { CR_NO: '20775', NAME_EN: 'Gulf Line Logistics', NAME_AR: 'الخط الخليجي', STATUS: 'DELETED', TYPE: 'WLL' },
-  { CR_NO: '91230', NAME_EN: 'Delmon Trading W.L.L', NAME_AR: 'دلمون التجارية', STATUS: 'ACTIVE', TYPE: 'WLL' },
-  { CR_NO: '77012', NAME_EN: 'Muharraq Trading Est.', NAME_AR: 'المحرق التجارية', STATUS: 'ACTIVE', TYPE: 'EST' },
-  { CR_NO: '65440', NAME_EN: 'Riffa Trading House', NAME_AR: 'بيت الرفاع التجاري', STATUS: 'ACTIVE', TYPE: 'WLL' },
-  { CR_NO: '58019', NAME_EN: 'Isa Town Trading Co.', NAME_AR: 'مدينة عيسى التجارية', STATUS: 'DELETED', TYPE: 'WLL' },
+  { CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L', NAME_AR: 'شركة أوال التجارية', STATUS: 'ACTIVE', TYPE: 'WLL', ADDRESS: 'Bldg 221, Rd 1704, Manama', ACTIVITY: 'Building materials', CAPITAL: 250000, LOGO_HTML: logo('awal') },
+  { CR_NO: '84121', NAME_EN: 'Manama Foods B.S.C', NAME_AR: 'المنامة للأغذية', STATUS: 'ACTIVE', TYPE: 'BSC', ADDRESS: 'Bldg 12, Rd 383, Manama', ACTIVITY: 'Food import', CAPITAL: 1200000, LOGO_HTML: logo('manama-foods') },
+  { CR_NO: '20775', NAME_EN: 'Gulf Line Logistics', NAME_AR: 'الخط الخليجي', STATUS: 'DELETED', TYPE: 'WLL', ADDRESS: 'Bldg 77, Rd 110, Hidd', ACTIVITY: 'Freight forwarding', CAPITAL: 90000, LOGO_HTML: logo('gulf-line') },
+  { CR_NO: '91230', NAME_EN: 'Delmon Trading W.L.L', NAME_AR: 'دلمون التجارية', STATUS: 'ACTIVE', TYPE: 'WLL', ADDRESS: 'Bldg 9, Rd 933, Muharraq', ACTIVITY: 'Household goods', CAPITAL: 150000, LOGO_HTML: logo('delmon') },
+  { CR_NO: '77012', NAME_EN: 'Muharraq Trading Est.', NAME_AR: 'المحرق التجارية', STATUS: 'ACTIVE', TYPE: 'EST', ADDRESS: 'Bldg 4, Rd 1129, Muharraq', ACTIVITY: 'Marine equipment', CAPITAL: 60000, LOGO_HTML: logo('muharraq') },
+  { CR_NO: '65440', NAME_EN: 'Riffa Trading House', NAME_AR: 'بيت الرفاع التجاري', STATUS: 'ACTIVE', TYPE: 'WLL', ADDRESS: 'Shop 18, Riffa Souq', ACTIVITY: 'Textiles', CAPITAL: 45000, LOGO_HTML: logo('riffa') },
+  { CR_NO: '58019', NAME_EN: 'Isa Town Trading Co.', NAME_AR: 'مدينة عيسى التجارية', STATUS: 'DELETED', TYPE: 'WLL', ADDRESS: 'Bldg 300, Isa Town', ACTIVITY: 'Office supplies', CAPITAL: 30000, LOGO_HTML: logo('isa-town') },
 ];
 
 const PER_PAGE = 2;
