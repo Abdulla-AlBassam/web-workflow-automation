@@ -72,9 +72,55 @@ function describe(el: Element): Evt {
 const INTERACTIVE = 'a,button,input,select,textarea,label,[role="button"],[role="link"],[role="tab"],[onclick]';
 
 document.addEventListener('click', (e) => {
+  if ((e.target as Element)?.closest?.('[data-wfr]')) return;
   const el = (e.target as Element)?.closest?.(INTERACTIVE) ?? (e.target as Element);
   if (el instanceof Element) push({ kind: 'action', action: 'click', target: describe(el) });
 }, { capture: true, passive: true });
+
+// Marking: highlighting text while recording offers a chip; clicking it records
+// the selection as wanted data. Marks drive the result columns downstream.
+let chip: HTMLButtonElement | undefined;
+
+function removeChip() {
+  chip?.remove();
+  chip = undefined;
+}
+
+function offerMark() {
+  removeChip();
+  const sel = window.getSelection();
+  const text = sel?.toString().replace(/\s+/g, ' ').trim();
+  if (!on || !sel || sel.isCollapsed || !text || text.length < 2) return;
+  const rect = sel.getRangeAt(0).getBoundingClientRect();
+  const node = sel.anchorNode;
+  const anchor = node instanceof Element ? node : node?.parentElement;
+  chip = document.createElement('button');
+  chip.dataset.wfr = 'chip';
+  chip.textContent = 'Mark data';
+  chip.style.cssText =
+    'position:fixed;z-index:2147483647;font:12px/1 system-ui,sans-serif;font-weight:600;' +
+    'background:#2563EB;color:#fff;border:none;border-radius:6px;padding:7px 12px;cursor:pointer;' +
+    'box-shadow:0 2px 8px rgb(0 0 0/.25);';
+  chip.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 120))}px`;
+  chip.style.top = `${Math.min(rect.bottom + 8, window.innerHeight - 44)}px`;
+  chip.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    push({ kind: 'action', action: 'mark', text: scrub(text)?.slice(0, 4000), target: anchor ? describe(anchor) : undefined });
+    chip!.textContent = 'Marked ✓';
+    chip!.style.background = '#1B8A5A';
+    setTimeout(removeChip, 700);
+  });
+  document.body.appendChild(chip);
+}
+
+document.addEventListener('mouseup', (e) => {
+  if ((e.target as Element)?.closest?.('[data-wfr]')) return;
+  // The selection is finalised after mouseup; read it on the next tick.
+  setTimeout(offerMark, 0);
+}, { capture: true, passive: true });
+
+window.addEventListener('scroll', removeChip, { passive: true });
 
 document.addEventListener('change', (e) => {
   const el = e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
@@ -136,7 +182,7 @@ function setState(next: { on: boolean; hosts: string[] }) {
       pageEvent();
     }
   }
-  if (!on) flush();
+  if (!on) { removeChip(); flush(); }
 }
 
 chrome.runtime.onMessage.addListener((msg) => {

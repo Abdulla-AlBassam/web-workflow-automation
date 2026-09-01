@@ -26,6 +26,7 @@ export type Analysis = {
   status: string;
   language: string;
   inputs: Input[];
+  marks: string[];       // text the operator highlighted as wanted data
   calls: Call[];
   outcome?: Call;
   authHint?: string;
@@ -112,6 +113,10 @@ export function analyse(trace: Trace): Analysis {
     .filter((e) => e.kind === 'action' && e.action === 'input' && typeof e.value === 'string' && e.value && e.value !== '[REDACTED]')
     .map((e) => ({ field: (e.target as any)?.id ?? (e.target as any)?.name ?? 'field', value: e.value as string, selector: (e.target as any)?.selector }));
 
+  const marks = [...new Set(events
+    .filter((e) => e.kind === 'action' && e.action === 'mark' && typeof e.text === 'string' && (e.text as string).trim())
+    .map((e) => e.text as string))];
+
   const calls: Call[] = events
     .filter((e) => e.kind === 'net' && e.url)
     .map((e) => {
@@ -141,5 +146,5 @@ export function analyse(trace: Trace): Analysis {
     notes.push(authHint);
   }
 
-  return { session: trace.meta.session, status: trace.meta.status, language, inputs, calls, outcome, authHint, notes };
+  return { session: trace.meta.session, status: trace.meta.status, language, inputs, marks, calls, outcome, authHint, notes };
 }

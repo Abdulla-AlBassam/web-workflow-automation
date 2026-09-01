@@ -125,6 +125,33 @@ try {
   check('missing second parameter stops the run',
     !multiMiss.ok && /missing required parameter/.test(multiMiss.stoppedReason ?? ''), multiMiss.stoppedReason);
 
+  // Marked selections become columns: the operator highlighted one field, so
+  // runs return exactly that field per row, generalised to new inputs.
+  await api('/api/sessions', { session: 'marked', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/marked/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'gulf line', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'GET', url: `${MOCK}/api/urlsearch?q=gulf%20line`, status: 200,
+      resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ CR_NO: '20775', NAME_EN: 'Gulf Line Logistics', STATUS: 'DELETED' }] }), seq: 3 },
+    { kind: 'action', action: 'mark', text: 'Gulf Line Logistics', seq: 4 },
+    { kind: 'session_stop', seq: 5 },
+  ]});
+  await api('/api/sessions/marked/stop', {});
+  const markedSpec = await api('/api/sessions/marked/spec', {});
+  check('marked value becomes a row-scoped column',
+    markedSpec.outcome?.columns?.length === 1 &&
+    markedSpec.outcome.columns[0].path === 'NAME_EN' &&
+    markedSpec.outcome.columns[0].scope === 'row',
+    JSON.stringify(markedSpec.outcome?.columns));
+  const markedRun = await api('/api/sessions/marked/run', { params: { cr_name_en: 'isa town' } });
+  check('run projects rows to the marked column only',
+    markedRun.ok &&
+    markedRun.extracted?.records?.rows?.length === 1 &&
+    markedRun.extracted.records.rows[0].NAME_EN === 'Isa Town Trading Co.' &&
+    Object.keys(markedRun.extracted.records.rows[0]).length === 1,
+    markedRun.stoppedReason ?? JSON.stringify(markedRun.extracted?.records?.rows));
+
   // A spec saved by an older generator (no pagination, old version) must be
   // regenerated before use, not executed as-is.
   const specPath = join(dataDir, 'enh', 'spec.json');

@@ -153,5 +153,21 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
     steps.push({ id: 'paginate', type: 'pagination', detail: `fetched ${page} pages, ${all.length} of ${total} rows` });
   }
 
+  // Marked-column projection: the operator highlighted what they wanted, so
+  // rows carry exactly those fields. Row-scoped paths resolve per record;
+  // body-scoped against the outcome response (one row when no record set).
+  const cols = spec.outcome.columns;
+  if (cols?.length) {
+    const rec = extracted.records as { count: number; rows: unknown[] } | undefined;
+    const source = cols.some((c) => c.scope === 'row') && rec ? rec.rows : [undefined];
+    const rows = source.map((row) => Object.fromEntries(cols.map((c) => [
+      c.name,
+      c.scope === 'row'
+        ? (c.path === '' ? row : resolvePath(row, c.path))
+        : resolvePath(finalResponse!.body, c.path),
+    ])));
+    extracted.records = { count: rows.length, rows };
+  }
+
   return { ok: true, steps, outcome: { expected: `${expect.path}=${expect.equals}`, actual, matched }, extracted };
 }

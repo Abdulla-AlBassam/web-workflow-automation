@@ -100,7 +100,9 @@ function timelineRow(e: Record<string, unknown>): string {
   const kind = String(e.kind);
   const tag = `<span class="tag tag-${kind}">${kind === 'action' ? esc(e.action) : kind.replace('_', ' ')}</span>`;
   let body = '';
-  if (kind === 'action') {
+  if (kind === 'action' && e.action === 'mark') {
+    body = `<span class="mark">“${esc(String(e.text ?? '').slice(0, 80))}”</span> <span class="sub">marked as wanted data</span>`;
+  } else if (kind === 'action') {
     const t = e.target as any;
     const val = e.value !== undefined ? ` = <span class="mono">${esc(e.value)}</span>` : '';
     body = `<span class="mono">${esc(t?.id ? '#' + t.id : t?.selector ?? '')}</span>${val}`;
@@ -133,7 +135,7 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
     <td class="sub">${esc(c.resultShape ?? '')}</td>
   </tr>`).join('');
 
-  const specCard = spec ? renderSpec(spec, meta.session) : `<div class="card"><h2>Automation</h2>
+  const specCard = spec ? renderSpec(spec, meta.session, a.marks.length) : `<div class="card"><h2>Automation</h2>
     <p class="note">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p></div>`;
 
   return shell(`Session ${meta.session}`, `
@@ -164,7 +166,7 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
     ${specCard}`);
 }
 
-function renderSpec(spec: any, session: string): string {
+function renderSpec(spec: any, session: string, marksCount = 0): string {
   const flow = spec.steps.map((s: any) =>
     `<span class="step step-${s.type === 'browser-token' ? 'token' : 'request'}">${esc(s.id)}<span class="sub"> · ${esc(s.type)}</span></span>`
   ).join('<span class="arrow">→</span>');
@@ -178,6 +180,12 @@ function renderSpec(spec: any, session: string): string {
     <div class="flow">${flow}</div>
     ${tokenNote ? `<p class="note">${esc(tokenNote.reason)}</p>` : '<p class="sub">Pure direct-request automation: no browser step needed.</p>'}
     <p class="sub" style="margin:10px 0 4px">Outcome gate: <span class="mono">${esc(spec.outcome.expect.path)}=${esc(spec.outcome.expect.equals)}</span>. The run stops with a reason if this check fails.</p>
+    ${spec.outcome.columns?.length
+      ? `<p class="sub" style="margin:4px 0">Columns from your marked selections: ${spec.outcome.columns.map((c: any) => `<span class="mono">${esc(c.name)}</span>`).join(', ')}.</p>`
+      : ''}
+    ${marksCount && !spec.outcome.columns?.length
+      ? '<p class="note" style="margin-top:8px">Your marked text was not found in any captured API response (it may be rendered server-side), so results show all fields instead.</p>'
+      : ''}
     <details class="spec-json"><summary>Show the spec JSON</summary><pre>${esc(JSON.stringify(spec, null, 2))}</pre></details>
   </div>
 
@@ -218,7 +226,28 @@ function renderSpec(spec: any, session: string): string {
       URL.revokeObjectURL(a.href);
     }
 
+    // Nested rows read as [object Object] in a table and a CSV cell; flatten
+    // them to dotted columns. Scalar arrays join; object arrays stay as JSON.
+    function flat(row) {
+      const out = {};
+      const walk = (v, key) => {
+        if (v && typeof v === 'object') {
+          if (Array.isArray(v)) {
+            if (v.every((x) => x === null || typeof x !== 'object')) out[key || 'value'] = v.join(', ');
+            else out[key || 'value'] = JSON.stringify(v);
+          } else {
+            for (const [k, x] of Object.entries(v)) walk(x, key ? key + '.' + k : k);
+          }
+        } else {
+          out[key || 'value'] = v;
+        }
+      };
+      walk(row, '');
+      return out;
+    }
+
     function toCsv(rows) {
+      rows = rows.map(flat);
       const cols = [];
       for (const row of rows) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
       const cell = (v) => '"' + String(v ?? '').replaceAll('"', '""') + '"';
@@ -241,6 +270,7 @@ function renderSpec(spec: any, session: string): string {
 
     const DISPLAY_CAP = 200;
     function rowsTable(rows, label) {
+      rows = rows.map(flat);
       const cols = Object.keys(rows[0] ?? {}).slice(0, 6);
       const caption = rows.length <= DISPLAY_CAP
         ? label + ': ' + rows.length + ' rows'

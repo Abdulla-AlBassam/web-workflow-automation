@@ -2,7 +2,7 @@ import { leaves, type Analysis, type Call, type Match } from './analyse.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 3;
+export const SPEC_VERSION = 4;
 
 export type Spec = {
   version: number;
@@ -15,6 +15,10 @@ export type Spec = {
     fromStep: string;
     expect: { path: string; equals: string };
     extract: Record<string, string>;
+    // Present when the operator marked text while recording: each column is
+    // where that marked value lives in the outcome response. Row-scoped paths
+    // resolve against each record; body-scoped against the whole response.
+    columns?: { name: string; path: string; scope: 'row' | 'body' }[];
     // Present when the outcome call is page-based: the runner re-issues it
     // with an incremented page value until the extracted total is reached.
     pagination?: { pagePath: string };
@@ -89,6 +93,44 @@ function extractionPaths(call: Call): Record<string, string> {
   return out;
 }
 
+function norm(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+// Marked text is evidence, not the extraction itself: find where each marked
+// value lives in the outcome response and record its path as a column. Paths
+// inside the record set become row-relative, so a future run yields the same
+// field for every row — the mark generalises beyond the recorded value.
+function markColumns(call: Call, recordsPath: string | undefined, marks: string[]) {
+  let body: unknown;
+  try { body = JSON.parse(call.resBody ?? ''); } catch { return undefined; }
+  const cols: { name: string; path: string; scope: 'row' | 'body' }[] = [];
+  for (const mark of marks) {
+    const m = norm(mark);
+    let hit: { path: string; exact: boolean } | undefined;
+    for (const { path, value } of leaves(body)) {
+      if (typeof value !== 'string' && typeof value !== 'number') continue;
+      const v = norm(String(value));
+      if (!v) continue;
+      if (v === m) { hit = { path, exact: true }; break; }
+      if (!hit && m.length >= 8 && v.includes(m)) hit = { path, exact: false };
+    }
+    if (!hit) continue;
+    let path = hit.path;
+    let scope: 'row' | 'body' = 'body';
+    if (recordsPath && path.startsWith(recordsPath + '.')) {
+      path = path.slice(recordsPath.length + 1).replace(/^\d+\.?/, '');
+      scope = 'row';
+    }
+    if (cols.some((c) => c.path === path && c.scope === scope)) continue;
+    const base = path.split('.').at(-1) || 'value';
+    let name = base;
+    for (let i = 2; cols.some((c) => c.name === name); i++) name = `${base}_${i}`;
+    cols.push({ name, path, scope });
+  }
+  return cols.length ? cols : undefined;
+}
+
 // Page-based outcome: a numeric request field named like "page" plus a total
 // in the response means the recording only saw one page of the result.
 function detectPagination(call: Call, extract: Record<string, string>): { pagePath: string } | undefined {
@@ -154,6 +196,7 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
 
   const extract = extractionPaths(outcome);
   const pagination = detectPagination(outcome, extract);
+  const columns = markColumns(outcome, extract.records, analysis.marks);
   return {
     version: SPEC_VERSION,
     name: opts.name,
@@ -165,6 +208,7 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
       fromStep: 'search',
       expect: outcomeExpectation(outcome),
       extract,
+      ...(columns ? { columns } : {}),
       ...(pagination ? { pagination } : {}),
     },
   };

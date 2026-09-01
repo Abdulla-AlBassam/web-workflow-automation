@@ -75,6 +75,12 @@ try {
   await page.fill('#secret', PIN);
   await page.click('#btn_search');
   await page.waitForSelector('#results tbody tr');
+
+  // Highlight the first result's name: the mark chip must appear, and clicking
+  // it must record the selection as wanted data.
+  await page.click('#results tbody tr td:nth-child(2)', { clickCount: 3 });
+  const chipEl = await page.waitForSelector('[data-wfr="chip"]', { timeout: 3000 });
+  await chipEl.click();
   await page.waitForTimeout(600); // let the recorder's 250ms batch flush drain
 
   const stopped = await sw.evaluate(() => globalThis.wfr.stop());
@@ -94,6 +100,9 @@ try {
     (e) => e.kind === 'action' && e.action === 'input' && e.target?.id === 'cr_number' && e.value === CR));
   check('search click captured', events.some(
     (e) => e.kind === 'action' && e.action === 'click' && e.target?.id === 'btn_search'));
+  check('marked selection captured', events.some(
+    (e) => e.kind === 'action' && e.action === 'mark' && e.text === 'Awal Trading Co. W.L.L'),
+    JSON.stringify(events.filter((e) => e.action === 'mark')));
 
   const net = events.find((e) => e.kind === 'net' && e.url?.includes('AdvanceSearchCR_Paging'));
   check('search API call captured', !!net);
