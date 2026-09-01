@@ -97,6 +97,34 @@ try {
   check('GET replay with encoded new input works', urlRun.ok && urlRun.extracted?.records?.rows?.[0]?.NAME_EN === 'Isa Town Trading Co.',
     urlRun.stoppedReason ?? JSON.stringify(urlRun.extracted?.records?.rows?.[0]));
 
+  // Multi-parameter workflow: two typed values, both landing in the request
+  // body, must yield two parameters and a run that honours both.
+  await api('/api/sessions', { session: 'multi', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/multi/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: '139867', target: { id: 'cr_number' }, seq: 2 },
+    { kind: 'action', action: 'input', value: 'trading', target: { id: 'cr_name_en' }, seq: 3 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/CRdetails/AdvanceSearchCR_Paging`, status: 200,
+      reqBody: JSON.stringify({ CR_NO: '139867', CR_NAME_EN: 'trading', PAGE: 1 }),
+      resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L' }] }), seq: 4 },
+    { kind: 'session_stop', seq: 5 },
+  ]});
+  await api('/api/sessions/multi/stop', {});
+  const multiSpec = await api('/api/sessions/multi/spec', {});
+  check('two typed values become two parameters',
+    multiSpec.parameters?.length === 2 &&
+    multiSpec.parameters.some((p) => p.name === 'cr_number') &&
+    multiSpec.parameters.some((p) => p.name === 'cr_name_en'),
+    JSON.stringify(multiSpec.parameters));
+  const multiRun = await api('/api/sessions/multi/run', { params: { cr_number: '84121', cr_name_en: 'manama' } });
+  check('multi-parameter run honours both values',
+    multiRun.ok && multiRun.extracted?.records?.rows?.[0]?.NAME_EN === 'Manama Foods B.S.C',
+    multiRun.stoppedReason ?? JSON.stringify(multiRun.extracted?.records?.rows));
+  const multiMiss = await api('/api/sessions/multi/run', { params: { cr_number: '84121' } });
+  check('missing second parameter stops the run',
+    !multiMiss.ok && /missing required parameter/.test(multiMiss.stoppedReason ?? ''), multiMiss.stoppedReason);
+
   // A spec saved by an older generator (no pagination, old version) must be
   // regenerated before use, not executed as-is.
   const specPath = join(dataDir, 'enh', 'spec.json');

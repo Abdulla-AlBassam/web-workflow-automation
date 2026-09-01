@@ -1,8 +1,8 @@
-import { leaves, type Analysis, type Call } from './analyse.js';
+import { leaves, type Analysis, type Call, type Match } from './analyse.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 2;
+export const SPEC_VERSION = 3;
 
 export type Spec = {
   version: number;
@@ -27,22 +27,44 @@ export type Step =
   // workflows have no bodyTemplate at all.
   | { id: string; type: 'request'; method: string; url: string; headers: Record<string, string>; bearerFrom?: string; bodyTemplate?: unknown };
 
-// Replace a matched leaf value with {{name}} everywhere it appears, so nested
+// Replace matched leaf values with {{name}} everywhere they appear, so nested
 // DataTables payloads survive. Value-matched, not path-matched, on purpose.
-function templatise(body: string, value: string, name: string): unknown {
+function templatise(body: string, byValue: Map<string, string>): unknown {
   const parsed = JSON.parse(body);
   const walk = (n: unknown): unknown => {
     if (Array.isArray(n)) return n.map(walk);
     if (n && typeof n === 'object') {
       return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, walk(v)]));
     }
-    return n === value ? `{{${name}}}` : n;
+    return typeof n === 'string' && byValue.has(n) ? `{{${byValue.get(n)}}}` : n;
   };
   return walk(parsed);
 }
 
 function paramName(field: string): string {
   return /name|cr_|query|search|term/i.test(field) ? field.replace(/[^\w]/g, '_') : 'query';
+}
+
+// One parameter per distinct typed value found in the outcome call. A value
+// that landed in both the body and the URL is still one parameter.
+type ParamGroup = { name: string; value: string; matches: Match[] };
+
+function paramGroups(matches: Match[]): ParamGroup[] {
+  const groups: ParamGroup[] = [];
+  for (const m of matches) {
+    let g = groups.find((x) => x.value === m.value);
+    if (!g) groups.push((g = { name: '', value: m.value, matches: [] }));
+    g.matches.push(m);
+  }
+  const used = new Set<string>();
+  for (const g of groups) {
+    const base = paramName(g.matches[0].input.field);
+    let name = base;
+    for (let i = 2; used.has(name); i++) name = `${base}_${i}`;
+    used.add(name);
+    g.name = name;
+  }
+  return groups;
 }
 
 // The response field that gates success: prefer an explicit status field, else
@@ -86,8 +108,7 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
   const outcome = analysis.outcome;
   if (!outcome) throw new Error(`cannot generate a spec: ${analysis.notes.join('; ') || 'no outcome call identified'}`);
 
-  const match = outcome.matches[0];
-  const pname = paramName(match.input.field);
+  const groups = paramGroups(outcome.matches);
   const needsAuth = opts.probeStatus === 401 || opts.probeStatus === 403 || !!analysis.authHint;
 
   const steps: Step[] = [];
@@ -101,13 +122,20 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
       reason: `direct call needs a bearer token (probe returned ${opts.probeStatus ?? analysis.authHint}); the site issues one client-side for anonymous users`,
     });
   }
-  const url = match.where === 'url' ? outcome.url.split(match.token).join(`{{${pname}}}`) : outcome.url;
+  let url = outcome.url;
+  for (const g of groups) {
+    for (const m of g.matches) {
+      if (m.where === 'url') url = url.split(m.token).join(`{{${g.name}}}`);
+    }
+  }
   let bodyTemplate: unknown;
   if (outcome.reqBody) {
-    if (match.where === 'body') {
-      bodyTemplate = templatise(outcome.reqBody, match.value, pname);
+    const bodyValues = new Map(
+      groups.filter((g) => g.matches.some((m) => m.where === 'body')).map((g) => [g.value, g.name]));
+    if (bodyValues.size) {
+      bodyTemplate = templatise(outcome.reqBody, bodyValues);
     } else {
-      // Constant body alongside a URL-borne parameter: keep it verbatim.
+      // Constant body alongside URL-borne parameters: keep it verbatim.
       try { bodyTemplate = JSON.parse(outcome.reqBody); } catch { bodyTemplate = outcome.reqBody; }
     }
   }
@@ -131,7 +159,7 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     name: opts.name,
     origin: opts.origin,
     language: analysis.language,
-    parameters: [{ name: pname, example: match.value, required: true }],
+    parameters: groups.map((g) => ({ name: g.name, example: g.value, required: true })),
     steps,
     outcome: {
       fromStep: 'search',
