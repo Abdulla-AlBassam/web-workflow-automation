@@ -77,6 +77,18 @@ createServer((req, res) => {
     if (!c) { res.writeHead(404).end(); return; }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ CR_NO: c.CR_NO, NAME_EN: c.NAME_EN, STATUS: c.STATUS, BIO: BIOS[c.CR_NO] ?? '' }));
+  } else if (req.method === 'POST' && req.url === '/api/bundle/search') {
+    // Algolia-shaped: the query hides inside one composite string field,
+    // URL-encoded ("params": "query=gulf%20line&page=0").
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const params = new URLSearchParams(JSON.parse(body || '{}').params ?? '');
+      const q = params.get('query') ?? '';
+      const hits = q ? COMPANIES.filter((c) => c.NAME_EN.toLowerCase().includes(q.toLowerCase())) : [];
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ nbHits: hits.length, hits }));
+    });
   } else if (req.method === 'GET' && req.url === '/noise') {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
     res.end('{"noise":true}');

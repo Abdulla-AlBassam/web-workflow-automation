@@ -58,7 +58,13 @@ function substitute(template: unknown, params: Record<string, string>): unknown 
   if (typeof template === 'string') {
     const m = template.match(/^\{\{(\w+)\}\}$/);
     if (m) return params[m[1]] ?? template;
-    return template.replace(/\{\{(\w+)\}\}/g, (_, n) => params[n] ?? `{{${n}}}`);
+    // Embedded placeholders splice into composite strings; enc:/plus: keep
+    // the encoding the recording used inside them.
+    return template.replace(/\{\{(?:(enc|plus):)?(\w+)\}\}/g, (_, mode, n) => {
+      const v = params[n];
+      if (v === undefined) return `{{${mode ? `${mode}:` : ''}${n}}}`;
+      return mode === 'enc' ? encodeURIComponent(v) : mode === 'plus' ? v.replace(/ /g, '+') : v;
+    });
   }
   return template;
 }

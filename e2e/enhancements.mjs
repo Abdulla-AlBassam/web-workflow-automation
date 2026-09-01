@@ -260,6 +260,80 @@ try {
   check('nested-list link is row-relative',
     nestedLink?.rowsPath === 'REFS.hits' && nestedLink?.path === 'id', JSON.stringify(nestedLink));
 
+  // Composite-string correlation (the Algolia shape): the typed value hides
+  // URL-encoded inside one string field; the spec splices an encoding-aware
+  // placeholder and the replay re-encodes the new input the same way.
+  await api('/api/sessions', { session: 'embed', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/embed/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'gulf line', target: { id: 'q' }, seq: 2 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/bundle/search`, status: 200,
+      reqBody: JSON.stringify({ indexName: 'companies', params: 'query=gulf%20line&hitsPerPage=30&page=0' }),
+      resBody: JSON.stringify({ nbHits: 1, hits: [{ CR_NO: '20775', NAME_EN: 'Gulf Line Logistics' }] }), seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]});
+  await api('/api/sessions/embed/stop', {});
+  const embSpec = await api('/api/sessions/embed/spec', {});
+  check('embedded value spliced with an encoding-aware placeholder',
+    embSpec.steps?.at(-1)?.bodyTemplate?.params === 'query={{enc:query}}&hitsPerPage=30&page=0',
+    JSON.stringify(embSpec.steps?.at(-1)?.bodyTemplate));
+  const embRun = await api('/api/sessions/embed/run', { params: { query: 'isa town' } });
+  check('embedded replay re-encodes the new input',
+    embRun.ok && embRun.extracted?.records?.rows?.[0]?.NAME_EN === 'Isa Town Trading Co.',
+    embRun.stoppedReason ?? JSON.stringify(embRun.extracted?.records?.rows));
+
+  // Plus-encoded variant of the same shape keeps its own encoding.
+  await api('/api/sessions', { session: 'embplus', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/embplus/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'gulf line', target: { id: 'q' }, seq: 2 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/bundle/search`, status: 200,
+      reqBody: JSON.stringify({ params: 'query=gulf+line&page=0' }),
+      resBody: JSON.stringify({ nbHits: 1, hits: [{ CR_NO: '20775', NAME_EN: 'Gulf Line Logistics' }] }), seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]});
+  await api('/api/sessions/embplus/stop', {});
+  const plusSpec = await api('/api/sessions/embplus/spec', {});
+  check('plus-encoded embedding keeps its encoding',
+    plusSpec.steps?.at(-1)?.bodyTemplate?.params === 'query={{plus:query}}&page=0',
+    JSON.stringify(plusSpec.steps?.at(-1)?.bodyTemplate));
+
+  // Word boundaries: "art" inside "smart" is not a correlation, so the
+  // session has no outcome and refuses to generate a spec.
+  await api('/api/sessions', { session: 'embx', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/embx/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'art', target: { id: 'q' }, seq: 2 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/bundle/search`, status: 200,
+      reqBody: JSON.stringify({ params: 'query=smart&page=0' }),
+      resBody: JSON.stringify({ nbHits: 1, hits: [{ NAME_EN: 'Smart Co.' }] }), seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]});
+  const embxStop = await api('/api/sessions/embx/stop', {});
+  check('embedded matching respects word boundaries', embxStop.spec === false);
+
+  // An exact field match wins outright: no embedded fallback touches other
+  // strings that happen to contain the same value.
+  await api('/api/sessions', { session: 'embp', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/embp/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'trading', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/CRdetails/AdvanceSearchCR_Paging`, status: 200,
+      reqBody: JSON.stringify({ CR_NAME_EN: 'trading', ECHO: 'query=trading&x=1', PAGE: 1 }),
+      resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L' }] }), seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]});
+  await api('/api/sessions/embp/stop', {});
+  const embpSpec = await api('/api/sessions/embp/spec', {});
+  check('exact field match wins over embedded fallback',
+    embpSpec.steps?.at(-1)?.bodyTemplate?.CR_NAME_EN === '{{cr_name_en}}' &&
+    embpSpec.steps?.at(-1)?.bodyTemplate?.ECHO === 'query=trading&x=1',
+    JSON.stringify(embpSpec.steps?.at(-1)?.bodyTemplate));
+
   // A spec saved by an older generator (no pagination, old version) must be
   // regenerated before use, not executed as-is.
   const specPath = join(dataDir, 'enh', 'spec.json');

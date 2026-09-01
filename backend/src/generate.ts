@@ -1,8 +1,8 @@
-import { leaves, norm, type Analysis, type Call, type Match } from './analyse.js';
+import { embeddedTokenRegex, leaves, norm, type Analysis, type Call, type Match } from './analyse.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 8;
+export const SPEC_VERSION = 9;
 
 export type Spec = {
   version: number;
@@ -53,6 +53,32 @@ function templatise(body: string, byValue: Map<string, string>): unknown {
     return typeof n === 'string' && byValue.has(n) ? `{{${byValue.get(n)}}}` : n;
   };
   return walk(parsed);
+}
+
+// Composite-string parameters: the value sits inside a larger string field,
+// so the placeholder is spliced over the bounded token rather than replacing
+// the leaf. The placeholder keeps the encoding the recording used ({{enc:x}},
+// {{plus:x}}), and a raw token in key=value position becomes {{enc:x}} anyway:
+// a no-op for the recorded value, correct for future values with spaces.
+function embedTemplatise(body: unknown, embeds: { token: string; name: string; value: string }[]): unknown {
+  const walk = (n: unknown): unknown => {
+    if (Array.isArray(n)) return n.map(walk);
+    if (n && typeof n === 'object') {
+      return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, walk(v)]));
+    }
+    if (typeof n !== 'string') return n;
+    let s = n;
+    for (const e of embeds) {
+      s = s.replace(embeddedTokenRegex(e.token), (_, offset: number, str: string) => {
+        const mode = e.token !== e.value
+          ? (e.token === encodeURIComponent(e.value) ? 'enc:' : 'plus:')
+          : str[offset - 1] === '=' ? 'enc:' : '';
+        return `{{${mode}${e.name}}}`;
+      });
+    }
+    return s;
+  };
+  return walk(body);
 }
 
 function paramName(field: string): string {
@@ -184,6 +210,12 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
       // Constant body alongside URL-borne parameters: keep it verbatim.
       try { bodyTemplate = JSON.parse(outcome.reqBody); } catch { bodyTemplate = outcome.reqBody; }
     }
+    const embeds = [...new Map(groups
+      .flatMap((g) => g.matches
+        .filter((m) => m.where === 'body-embedded')
+        .map((m) => [`${g.name} ${m.token}`, { token: m.token, name: g.name, value: g.value }] as const))
+    ).values()];
+    if (embeds.length) bodyTemplate = embedTemplatise(bodyTemplate, embeds);
   }
   steps.push({
     id: 'search',

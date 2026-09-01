@@ -37,6 +37,9 @@ Deterministic correlation, no model in the loop:
 
 - Which typed value landed in which request, matched exactly in JSON and
   form-encoded bodies, and in URLs in raw, percent- and plus-encoded forms.
+  A value hiding inside a composite string field (a query string bundled
+  into one JSON value, as Algolia-style APIs send) is matched as a bounded
+  token, but only when nothing matched it exactly — exact evidence wins.
 - Which request produced the outcome: scored by whether it carried an input
   value, succeeded, and returned a record set.
 - Chains: a value from the search response (an id, a slug) found in a later
@@ -126,6 +129,9 @@ verified against the real site.
   direct API call. Live: Sijilat CR search.
 - **Search with the value in the URL** (GET, any common encoding) → a
   templatised URL. Live: wwe.com search, 11,410 results replayed.
+- **Search with the value inside a composite string field** (Algolia-style
+  `"params": "query=x&page=0"`) → the placeholder splices into the string
+  and keeps the encoding the site used.
 - **Sites requiring an anonymous token** → a browser step acquires it at run
   time, generically. Live: Sijilat (`localStorage` bearer, discovered and
   named by the run).
@@ -149,10 +155,6 @@ Honest limits, current as of this version:
   sites), there is no call to promote and the tool refuses with a note.
   Marked single pages work (see browser-extract); a generic scraper for
   repeated HTML list structures is not built.
-- **Values hidden inside composite strings.** Body correlation matches whole
-  field values. A site that wraps the query inside a larger string field,
-  as Algolia-backed searches do (`"params": "query=x&page=0"`), is not
-  correlated and the session refuses honestly.
 - **URL-borne pagination.** Fetch-all triggers only for a page field carried
   in the request body; `?page=2` in a URL is not yet detected.
 - **Logins, CAPTCHAs and bot walls.** Out of scope by design. No credential

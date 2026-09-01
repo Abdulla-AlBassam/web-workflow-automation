@@ -6,9 +6,11 @@ export type Trace = { meta: { session: string; status: string }; events: Record<
 
 export type Input = { field: string; value: string; selector?: string };
 
-// token is the exact substring that matched (URL matches may be encoded), so
-// spec generation can splice a placeholder in its place.
-export type Match = { path: string; value: string; input: Input; where: 'body' | 'url'; token: string };
+// token is the exact substring that matched (URL and embedded matches may be
+// encoded), so spec generation can splice a placeholder in its place.
+// 'body-embedded' means the value sat inside a larger string field — a query
+// string bundled into one JSON value, as Algolia-style APIs send.
+export type Match = { path: string; value: string; input: Input; where: 'body' | 'url' | 'body-embedded'; token: string };
 
 export type Call = {
   url: string;
@@ -84,6 +86,14 @@ export function* leaves(node: unknown, path = ''): Generator<{ path: string; val
   }
 }
 
+// Bounded occurrence of a token inside a composite string: the neighbouring
+// characters must not be alphanumeric, so partial words ("art" in "smart")
+// and digit runs never correlate.
+export function embeddedTokenRegex(token: string): RegExp {
+  const esc = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, 'g');
+}
+
 function findMatches(reqBody: string | undefined, url: string, inputs: Input[]): Match[] {
   const matches: Match[] = [];
   const parsed = parseBody(reqBody);
@@ -101,6 +111,22 @@ function findMatches(reqBody: string | undefined, url: string, inputs: Input[]):
       if (url.includes(token)) {
         matches.push({ path: 'url', value: input.value, input, where: 'url', token });
         break;
+      }
+    }
+  }
+  // Fallback: the value bundled inside a composite string field. Exact
+  // evidence wins — this runs only for inputs the call carried nowhere else.
+  if (parsed !== undefined) {
+    for (const input of inputs) {
+      if (!input.value || matches.some((m) => m.input.value === input.value)) continue;
+      for (const token of new Set([input.value, encodeURIComponent(input.value), input.value.replace(/ /g, '+')])) {
+        let found = false;
+        for (const { path, value } of leaves(parsed)) {
+          if (typeof value !== 'string' || !embeddedTokenRegex(token).test(value)) continue;
+          matches.push({ path, value: input.value, input, where: 'body-embedded', token });
+          found = true;
+        }
+        if (found) break;
       }
     }
   }
