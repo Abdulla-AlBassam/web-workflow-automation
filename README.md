@@ -198,7 +198,7 @@ backend/     Fastify: event store, redaction, analysis, spec generation, UI
 runner/      Spec execution: direct requests, token discovery, extraction
 fixtures/    Local mock site, banked traces and specs (tests and demos)
 e2e/         Capture e2e (real Chromium), failure paths, enhancements
-docs/        Spec format, site evidence, UI rules, roadmap
+docs/        Spec format, site evidence, UI rules
 ```
 
 ## Tests
