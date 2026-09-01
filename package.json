@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "backend": "tsx backend/src/server.ts",
+    "backend:watch": "tsx watch backend/src/server.ts",
     "build:ext": "node extension/build.mjs",
     "fixture": "node fixtures/serve.mjs",
     "record:live": "node tools/record-live.mjs",
