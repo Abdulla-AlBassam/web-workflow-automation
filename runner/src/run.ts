@@ -63,7 +63,9 @@ function substitute(template: unknown, params: Record<string, string>): unknown 
     return template.replace(/\{\{(?:(enc|plus):)?(\w+)\}\}/g, (_, mode, n) => {
       const v = params[n];
       if (v === undefined) return `{{${mode ? `${mode}:` : ''}${n}}}`;
-      return mode === 'enc' ? encodeURIComponent(v) : mode === 'plus' ? v.replace(/ /g, '+') : v;
+      // plus is full form-encoding (spaces as +), not just a space swap, so a
+      // future value carrying & or = cannot break the composite string.
+      return mode === 'enc' ? encodeURIComponent(v) : mode === 'plus' ? encodeURIComponent(v).replace(/%20/g, '+') : v;
     });
   }
   return template;

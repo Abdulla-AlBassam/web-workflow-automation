@@ -2,7 +2,7 @@ import { embeddedTokenRegex, leaves, norm, type Analysis, type Call, type Match 
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 9;
+export const SPEC_VERSION = 10;
 
 export type Spec = {
   version: number;
@@ -167,7 +167,10 @@ function markColumns(call: Call, recordsPath: string | undefined, marks: string[
 // in the response means the recording only saw one page of the result.
 function detectPagination(call: Call, extract: Record<string, string>): { pagePath: string } | undefined {
   if (!extract.total || !extract.records) return undefined;
-  for (const { path, value } of leaves(JSON.parse(call.reqBody ?? '{}'))) {
+  // Form-encoded bodies cannot express a re-issuable JSON page field.
+  let body: unknown;
+  try { body = JSON.parse(call.reqBody ?? '{}'); } catch { return undefined; }
+  for (const { path, value } of leaves(body)) {
     const key = path.split('.').at(-1) ?? '';
     if (/^page(_?number)?$/i.test(key) && typeof value === 'number') return { pagePath: path };
   }
@@ -201,11 +204,22 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     }
   }
   let bodyTemplate: unknown;
+  let formBody = false;
   if (outcome.reqBody) {
+    try { JSON.parse(outcome.reqBody); } catch { formBody = outcome.reqBody.includes('='); }
     const bodyValues = new Map(
       groups.filter((g) => g.matches.some((m) => m.where === 'body')).map((g) => [g.value, g.name]));
-    if (bodyValues.size) {
+    if (bodyValues.size && !formBody) {
       bodyTemplate = templatise(outcome.reqBody, bodyValues);
+    } else if (bodyValues.size) {
+      // Form-encoded body: the values matched on the decoded fields, so
+      // splice encoding-aware placeholders into the raw string instead.
+      const formEmbeds = [...bodyValues].flatMap(([value, name]) => {
+        const token = [encodeURIComponent(value), value.replace(/ /g, '+'), value]
+          .find((t) => embeddedTokenRegex(t).test(outcome.reqBody!));
+        return token ? [{ token, name, value }] : [];
+      });
+      bodyTemplate = formEmbeds.length ? embedTemplatise(outcome.reqBody, formEmbeds) : outcome.reqBody;
     } else {
       // Constant body alongside URL-borne parameters: keep it verbatim.
       try { bodyTemplate = JSON.parse(outcome.reqBody); } catch { bodyTemplate = outcome.reqBody; }
@@ -224,7 +238,9 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     url,
     headers: {
       accept: '*/*',
-      ...(bodyTemplate !== undefined ? { 'content-type': 'application/json; charset=utf-8' } : {}),
+      ...(bodyTemplate !== undefined
+        ? { 'content-type': formBody ? 'application/x-www-form-urlencoded' : 'application/json; charset=utf-8' }
+        : {}),
     },
     ...(needsAuth ? { bearerFrom: 'token' } : {}),
     ...(bodyTemplate !== undefined ? { bodyTemplate } : {}),

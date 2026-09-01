@@ -132,6 +132,10 @@ verified against the real site.
 - **Search with the value inside a composite string field** (Algolia-style
   `"params": "query=x&page=0"`) → the placeholder splices into the string
   and keeps the encoding the site used.
+- **Classic form-encoded posts** (`name=x&lang=en` bodies, the legacy AJAX
+  shape) → the raw body is templated in place and replays form-encoded.
+- **A recording whose search returned zero results** still yields a working
+  automation: correlation keys on where the value went, not what came back.
 - **Sites requiring an anonymous token** → a browser step acquires it at run
   time, generically. Live: Sijilat (`localStorage` bearer, discovered and
   named by the run).
@@ -202,5 +206,6 @@ docs/        Spec format, site evidence, UI rules, roadmap
 npm run e2e                # full record→replay path in real Chromium (backend must be stopped)
 npm run test:failures      # every named stop: interrupted, missing param, changed outcome, absent token
 npm run test:enhancements  # pagination, bulk, URL specs, chains, extraction
+npm run test:matrix        # scenario matrix: seven site shapes recorded end to end in real Chromium
 npm run typecheck
 ```

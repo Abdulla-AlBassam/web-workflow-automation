@@ -77,17 +77,27 @@ try {
   await page.waitForSelector('#results tbody tr');
 
   // Highlight the first result's name: the mark chip must appear, and clicking
-  // it must record the selection as wanted data.
-  await page.click('#results tbody tr td:nth-child(2)', { clickCount: 3 });
-  await page.waitForTimeout(300); // each mouseup re-renders the chip; let it settle
+  // it must record the selection as wanted data. Drag-select rather than
+  // triple-click: Chromium's triple-click no longer selects text inside an
+  // anchor, and the drag is the gesture operators are taught anyway.
+  const dragSelect = async (selector) => {
+    const box = await page.locator(selector).boundingBox();
+    // Top of the first line to the bottom of the last: a horizontal drag at
+    // mid-height dies on the boundary between two text lines.
+    await page.mouse.move(box.x + 2, box.y + 6);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 4, box.y + box.height - 6, { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300); // each mouseup re-renders the chip; let it settle
+  };
+  await dragSelect('#results tbody tr td:nth-child(2)');
   await page.click('[data-wfr="chip"]');
 
   // Follow the result into its detail view and mark the bio: the recording now
   // carries a chained workflow (search → detail).
   await page.click('#results tbody a');
   await page.waitForSelector('#bio:not([hidden])');
-  await page.click('#bio_text', { clickCount: 3 });
-  await page.waitForTimeout(300);
+  await dragSelect('#bio_text');
   await page.click('[data-wfr="chip"]');
   await page.waitForTimeout(600); // let the recorder's 250ms batch flush drain
 

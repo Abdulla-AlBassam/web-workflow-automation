@@ -12,7 +12,8 @@
     "e2e": "node e2e/record.e2e.mjs",
     "test:failures": "tsx e2e/failure-paths.mjs",
     "test:enhancements": "node e2e/enhancements.mjs",
-    "typecheck": "tsc -p extension/tsconfig.json && tsc -p backend/tsconfig.json && tsc -p runner/tsconfig.json"
+    "typecheck": "tsc -p extension/tsconfig.json && tsc -p backend/tsconfig.json && tsc -p runner/tsconfig.json",
+    "test:matrix": "node e2e/matrix.e2e.mjs"
   },
   "dependencies": {
     "fastify": "^5.0.0"

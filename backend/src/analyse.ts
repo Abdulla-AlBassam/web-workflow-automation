@@ -107,7 +107,11 @@ function findMatches(reqBody: string | undefined, url: string, inputs: Input[]):
   }
   // GET-style workflows carry the value in the URL instead, usually encoded.
   for (const input of inputs) {
-    for (const token of new Set([input.value, encodeURIComponent(input.value), input.value.replace(/ /g, '+')])) {
+    const forms = [input.value, encodeURIComponent(input.value), input.value.replace(/ /g, '+')];
+    // Chromium's URL serialiser also percent-encodes apostrophes in query
+    // strings (the "special-query" set), which encodeURIComponent does not.
+    for (const f of [...forms]) if (f.includes("'")) forms.push(f.replace(/'/g, '%27'));
+    for (const token of new Set(forms)) {
       if (url.includes(token)) {
         matches.push({ path: 'url', value: input.value, input, where: 'url', token });
         break;
@@ -149,6 +153,19 @@ function describeResult(resBody: string | undefined): { shape?: string; records:
     if (v && typeof v === 'object') {
       for (const [k2, v2] of Object.entries(v as Record<string, unknown>)) {
         if (Array.isArray(v2) && v2.length > best) { best = v2.length; where = `${k}.${k2}`; }
+      }
+    }
+  }
+  // A recording of an empty search still names its record set when a
+  // result-shaped field is present, so a replay with a richer input extracts.
+  if (!best) {
+    const resulty = /^(records|rows|hits|items|results|list|data|entries)$/i;
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (Array.isArray(v) && resulty.test(k)) return { shape: `0 records at ${k}`, records: 0 };
+      if (v && typeof v === 'object') {
+        for (const [k2, v2] of Object.entries(v as Record<string, unknown>)) {
+          if (Array.isArray(v2) && resulty.test(k2)) return { shape: `0 records at ${k}.${k2}`, records: 0 };
+        }
       }
     }
   }
@@ -282,8 +299,14 @@ export function analyse(trace: Trace): Analysis {
       };
     });
 
-  const ranked = [...calls].sort((a, b) => b.outcomeScore - a.outcomeScore);
+  // Only a structured response qualifies as an outcome: a navigation that
+  // merely carries the value in its URL (a server-rendered results page) is
+  // not a call the runner could re-issue for data.
+  const ranked = calls.filter((c) => isStructured(c.resBody)).sort((a, b) => b.outcomeScore - a.outcomeScore);
   const outcome = ranked[0]?.matches.length ? ranked[0] : undefined;
+  if (!outcome && calls.some((c) => c.matches.length)) {
+    notes.push('the request(s) carrying the typed value returned no structured data (a server-rendered results page?) — there is no direct call to promote');
+  }
 
   // Chain detection needs positive evidence, never a guess: a marked value
   // found in the later response, or a recorded click leading to it.
@@ -345,7 +368,7 @@ export function analyse(trace: Trace): Analysis {
 
   if (!inputs.length) notes.push('No operator input values captured — nothing to parameterise.');
   if (!calls.length) notes.push('No same-site network calls captured — outcome may be pure DOM, browser steps required.');
-  if (calls.length && !outcome) notes.push('No request carried an input value; cannot identify a parameterised outcome call from requests alone.');
+  if (calls.length && !outcome && !calls.some((c) => c.matches.length)) notes.push('No request carried an input value; cannot identify a parameterised outcome call from requests alone.');
 
   let authHint: string | undefined;
   if (outcome && (outcome.status === 401 || outcome.status === 403)) {
