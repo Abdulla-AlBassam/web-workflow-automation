@@ -153,23 +153,60 @@ verified against the real site.
 
 ## What it cannot do
 
-Honest limits, current as of this version:
+Honest limits, current as of this version. The pipeline correlates the value
+you typed against the requests the page made and needs the outcome to come
+back as structured data; every limit below follows from that, or is a policy
+line drawn on purpose.
+
+Nothing to correlate:
+
+- **No typed value.** A browse-only recording (open a menu, land on a
+  listing, stop) has no parameter, so no automation is derived, even when a
+  structured listing call was captured on the way. Fixed, parameterless
+  listings are not yet promoted.
+- **Values transformed before sending.** A typed date sent as an epoch, a
+  dropdown choice sent as its numeric id, a name sent hashed. Correlation is
+  verbatim (raw, URL-encoded, plus-encoded, or embedded in a composite
+  string); a transformed value never matches and the recording refuses.
+- **Traffic the recorder cannot see.** JSONP script tags, WebSockets and
+  cross-origin iframes are invisible to fetch/XHR interception. The repair
+  assistant can often recover the JSONP case by proposing the plain-JSON form
+  of the same endpoint; it cannot recover WebSockets.
+- **Third-party API hosts** are captured only if added to the allowlist when
+  the recording starts; the popup prefills the current site only.
+
+Nothing structured to extract:
 
 - **Server-rendered result lists.** If the search results themselves are
   HTML with no API behind them (common on older sites and on Next.js/RSC
   sites), there is no call to promote and the tool refuses with a note.
   Marked single pages work (see browser-extract); a generic scraper for
   repeated HTML list structures is not built.
+- **Non-JSON outcomes.** XML, PDF, CSV downloads and images are not
+  structured in the tool's sense and are refused, as are results computed
+  entirely in page JavaScript with no request behind them.
+
+The replay cannot reproduce the request:
+
+- **Per-request signing, nonces, CSRF tokens and timestamps.** If every
+  request must be individually minted by page JavaScript, a direct call
+  cannot be generated. (Anonymous token minting, as on Sijilat, is a
+  reusable value parked in web storage, not signing, and is handled.)
+- **Logins, CAPTCHAs and bot walls.** Out of scope by design. No credential
+  capture, no CAPTCHA bypass, no authenticated areas: cookies and auth
+  headers are never kept, so a cookie-session API replays as 401 and the run
+  stops with that reason. A site behind a Cloudflare challenge will not
+  record usefully.
+
+Shape limits of the current build:
+
+- **One-hop chains.** A search response can feed one detail call or one
+  page. A multi-step wizard carrying state between steps is not attempted.
 - **URL-borne pagination.** Fetch-all triggers only for a page field carried
   in the request body; `?page=2` in a URL is not yet detected.
-- **Logins, CAPTCHAs and bot walls.** Out of scope by design. No credential
-  capture, no CAPTCHA bypass, no authenticated areas. A site behind a
-  Cloudflare challenge will not record usefully.
-- **Per-request signing.** If every request must be individually signed by
-  page JavaScript, a direct call cannot be generated. (Anonymous token
-  minting, as on Sijilat, is not signing and is handled.)
-- **Third-party API hosts** are captured only if added to the allowlist when
-  the recording starts; the popup prefills the current site only.
+- **Active tab only.** Results that open in a new tab are not recorded.
+- **The repair assistant proposes a single direct call.** Anything that
+  needs a browser step or a token step stays with the deterministic path.
 - **One recording, one workflow.** A new site or a changed workflow needs a
   fresh recording and a human eye on the generated spec. The tool
   generalises the method, not any individual automation.
