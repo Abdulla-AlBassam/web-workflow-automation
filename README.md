@@ -200,9 +200,13 @@ re-record instead.
 What the operator marked is what a run must return. When the recording
 carries marked selections, a proposal is accepted only if its response holds
 them as plain fields: the validator locates each mark in the live response
-(ignoring bracketed reference markers such as `[4]`, which page text has and
-API fields do not), picks the record set by that evidence rather than by
-position, and saves the marks as the spec's columns. A response carrying only
+(comparing letters and digits only, so reference markers such as `[4]`,
+pronunciation glyphs and punctuation that page text has and API fields do not
+cannot defeat a match, and a long selection matches on any shared stretch),
+picks the record set by that evidence rather than by
+position (the model may say where the records live, and that hint breaks
+ties but never overrules the evidence), and saves the marks as the spec's
+columns. A response carrying only
 some of the marks is fed back to the model with the missing ones named; if
 nothing better turns up, the best verified attempt is kept and the console
 says which marks it lacks.

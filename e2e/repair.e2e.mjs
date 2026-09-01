@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { Script } from 'node:vm';
 import { join } from 'node:path';
 
 const BACKEND_PORT = 4893;
@@ -41,7 +42,7 @@ await ensureFree(SITE_PORT);
 // the extract.
 const ARTICLES = [
   { pageid: 8569916, ns: 0, title: 'English language', description: 'West Germanic language',
-    extract: 'English is a West Germanic language of the Indo-European language family that emerged in early medieval England and has since become a global lingua franca. The language is named after the Angles, one of the Germanic peoples who migrated to Britain.' },
+    extract: 'English (pronounced [ˈɪŋɡlɪʃ] ) is a West Germanic language of the Indo-European language family that emerged in early medieval England and has since become a global lingua franca. The language is named after the Angles, one of the Germanic peoples who migrated to Britain.' },
   { pageid: 10597, ns: 0, title: 'French language', description: 'Romance language',
     extract: 'French is a Romance language of the Indo-European family. Like all other Romance languages, French descended from the Vulgar Latin of the Roman Empire.' },
 ];
@@ -71,8 +72,9 @@ const site = createServer((req, res) => {
     const page = ARTICLES.find((a) => a.title.toLowerCase() === title.toLowerCase());
     res.writeHead(page ? 200 : 404, { 'content-type': 'application/json' });
     res.end(JSON.stringify(page
-      ? { type: 'standard', title: page.title, description: page.description, extract: page.extract,
-          content_urls: { desktop: { page: `${SITE}/wiki/x` }, mobile: { page: `${SITE}/m/x` } } }
+      ? { type: 'standard', title: page.title, description: page.description, extract: page.extract.replace(/\(pronounced[^)]*\) /, ''),
+          titles: { canonical: page.title.replace(/ /g, '_') },
+          content_urls: { desktop: { page: `${SITE}/wiki/${page.title.replace(/ /g, '_')}` }, mobile: { page: `${SITE}/m/x` } } }
       : { type: 'not_found' }));
     return;
   }
@@ -97,9 +99,9 @@ site.listen(SITE_PORT);
 // Scripted mock LLM: each POST /v1/messages consumes the next reply.
 const SUGGEST = `${SITE}/api/suggest`;
 const ARTICLE = `${SITE}/api/article`;
-const wikiCall = (extra = '') => ({
+const wikiCall = (extra = '', rowsPath = 'query.pages') => ({
   method: 'GET', url: `${ARTICLE}?titles={{query}}&explaintext=1${extra}`, body: null,
-  params: [{ name: 'query', recordedValue: 'english language' }],
+  params: [{ name: 'query', recordedValue: 'english language' }], rowsPath,
 });
 const scripts = [
   // jsonp session, round 1: realistic mistake — keeps the callback parameter.
@@ -129,9 +131,9 @@ const scripts = [
   // wikiold session (refine): same corrected call.
   { diagnosis: 'The saved automation extracted the normalisation echo instead of the page records.',
     action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall() },
-  // wikifv1 session: records keyed by page id.
+  // wikifv1 session: records keyed by page id; the model's rows hint is wrong.
   { diagnosis: 'Same API, default format.',
-    action: 'propose', title: 'Wikipedia Article Lookup (v1)', call: wikiCall('&format=1') },
+    action: 'propose', title: 'Wikipedia Article Lookup (v1)', call: wikiCall('&format=1', 'query.missing') },
   // wikipart session: round 1 forgets the extract, round 2 adds it.
   { diagnosis: 'Page info should be enough.',
     action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall('&prop=info') },
@@ -144,7 +146,7 @@ const scripts = [
     action: 'stop', advice: 'Re-record marking only the title.' },
   // wikisum session: a single-record summary response.
   { diagnosis: 'The summary endpoint returns the title and intro directly.',
-    action: 'propose', title: 'Wikipedia Summary', call: { ...wikiCall(), url: `${SITE}/api/summary/{{query}}` } },
+    action: 'propose', title: 'Wikipedia Summary', call: { ...wikiCall('', null), url: `${SITE}/api/summary/{{query}}` } },
   // jsonp session refined without marks: the model stops, the spec stays.
   { diagnosis: 'The saved call already returns the clicked result.',
     action: 'stop', advice: 'Describe what is wrong with the result.' },
@@ -191,7 +193,7 @@ const jsonpEvents = (session) => [
 // The Wikipedia shape: typed input, JSONP typeahead, a click through to a
 // server-rendered article, two marks on it — the title, and an intro
 // paragraph carrying citation markers the API's plain text will not have.
-const INTRO_MARK = 'English is a West Germanic language of the Indo-European language family that emerged in early medieval England and has since become a global lingua franca.[4][5][6] The language is named after the Angles, one of the Germanic peoples who migrated to Britain.';
+const INTRO_MARK = 'English (pronounced [ˈɪŋɡlɪʃ] ⓘ)[1] is a West Germanic language of the Indo-European language family that emerged in early medieval England and has since become a global lingua franca.[4][5][6] The language is named after the Angles, one of the Germanic peoples who migrated to Britain.';
 const wikiEvents = () => [
   { kind: 'session_start', seq: 0 },
   { kind: 'page', url: `${SITE}/`, lang: 'en', seq: 1 },
@@ -211,6 +213,15 @@ async function repair(session, body) {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   }).then((r) => r.text());
   return text.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+// Every inline script on a page must parse: a bad escape in a template
+// literal once emitted a raw newline into the page's JavaScript and the
+// repair button died silently.
+function scriptsCompile(html) {
+  for (const [, src] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+    try { new Script(src); } catch (e) { return `inline script does not parse: ${e.message}`; }
+  }
+  return '';
 }
 const readSpec = (session) => JSON.parse(readFileSync(join(dataDir, session, 'spec.json'), 'utf8'));
 async function recordWiki(session) {
@@ -251,6 +262,7 @@ try {
 
   const page = await fetch(`${BACKEND}/session/jsonp`).then((r) => r.text());
   check('session page shows the repair provenance', page.includes('Built by the LLM repair assistant'));
+  check('session page scripts parse (spec present)', scriptsCompile(page) === '', scriptsCompile(page));
   const after = JSON.parse(readFileSync(join(dataDir, 'jsonp', 'spec.json'), 'utf8'));
   check('repaired spec survives page-load regeneration', !!after.repaired);
 
@@ -264,6 +276,8 @@ try {
   ]});
   await api('/api/sessions/noinput/stop', {});
   const noLines = await repair('noinput');
+  const refusalPage = await fetch(`${BACKEND}/session/noinput`).then((r) => r.text());
+  check('session page scripts parse (refusal card)', scriptsCompile(refusalPage) === '', scriptsCompile(refusalPage));
   check('no-input recording gets advice, not a spec',
     kinds(noLines).includes('advice') && !existsSync(join(dataDir, 'noinput', 'spec.json')),
     JSON.stringify(noLines));
@@ -349,6 +363,9 @@ try {
   const fv1Lines = await repair('wikifv1');
   check('id-keyed records: verified as rows', fv1Lines.some((l) => l.kind === 'ok' && /1 row\(s\) at query\.pages/.test(l.text)),
     JSON.stringify(fv1Lines));
+  check('a rows hint the response does not bear out is reported and ignored',
+    fv1Lines.some((l) => l.kind === 'info' && /proposed rows path "query\.missing" is not a list of records; using "query\.pages"/.test(l.text)),
+    JSON.stringify(fv1Lines));
   const fv1Run = await api('/api/sessions/wikifv1/run', { params: { query: 'french language' } });
   check('id-keyed records: replay returns the marked fields per record',
     fv1Run.ok && fv1Run.extracted?.records?.rows?.[0]?.title === 'French language' &&
@@ -360,7 +377,8 @@ try {
   await recordWiki('wikipart');
   const partLines = await repair('wikipart');
   check('partial marks: round 1 fed back with the missing selection',
-    partLines.some((l) => l.kind === 'fail' && /1 of 2 marked selections located; missing: "english is a west germanic/.test(l.text)),
+    partLines.some((l) => l.kind === 'ok' && /1 row\(s\) at query\.pages.*columns from your marked selections: title$/.test(l.text)) &&
+    partLines.some((l) => l.kind === 'fail' && /1 of 2 marked selections located; missing: "english pronounced is a west germanic/.test(l.text)),
     JSON.stringify(partLines));
   check('partial marks: round 2 completes both columns',
     partLines.some((l) => l.kind === 'saved') && readSpec('wikipart').outcome.columns?.length === 2);

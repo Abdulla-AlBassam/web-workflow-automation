@@ -31,6 +31,7 @@ type Proposal = {
     url: string;
     body?: unknown;
     params: { name: string; recordedValue: string }[];
+    rowsPath?: string | null;
   };
 };
 
@@ -43,6 +44,7 @@ Rules:
 - Prefer endpoints visible in the recording. Metadata-only requests (whose bodies were not captured) are prime candidates: a JSONP request (resourceType "script", callback= parameter) usually becomes plain JSON when the callback parameter is dropped.
 - When the operator marked text while recording, that text is what every run must return. The proposal is accepted only if the response carries each marked selection in a plain field (columns are located by matching the marked text against field values), so ask for plain text rather than HTML where the API offers the choice, and request the fields the marks need.
 - In REFINE mode the session already has an automation, but its result did not match the marked selections or the operator's note. Diagnose the mismatch and propose the corrected call; the same endpoint with different parameters is fine.
+- Name where the result records live in the response (rowsPath) when you know the API: it is checked against the actual response and used only if the evidence agrees. A response that is one record, not a list, has rowsPath null.
 - If no direct call can work from this evidence (nothing was typed, or the outcome exists only in server-rendered HTML with no API), use action "stop" with concrete advice on how to re-record so the deterministic pipeline succeeds.
 
 Reply with ONLY a JSON object, no prose, no code fences:
@@ -55,7 +57,8 @@ Reply with ONLY a JSON object, no prose, no code fences:
     "method": "GET" | "POST",
     "url": "https://host/path?q={{query}}",
     "body": null,
-    "params": [{ "name": "query", "recordedValue": "the value the operator typed" }]
+    "params": [{ "name": "query", "recordedValue": "the value the operator typed" }],
+    "rowsPath": "query.results" | null
   }
 }`;
 
@@ -97,7 +100,7 @@ function evidenceStrings(events: Record<string, unknown>[], a: Analysis): string
   for (const e of events) {
     if (e.kind !== 'action' || e.action !== 'click') continue;
     const text = (e.target as { text?: string } | undefined)?.text;
-    const n = norm(String(text ?? '').split('\n')[0]);
+    const n = markKey(String(text ?? '').split('\n')[0]);
     if (n.length >= 4) out.add(n.slice(0, 60));
   }
   return [...out];
@@ -126,8 +129,10 @@ function describeRun(r: unknown): string {
 // Locate the result set in a live response: every array of objects (or
 // strings) and every id-keyed map of records is a candidate. The one carrying
 // the most marked selections and evidence wins, then the longest — never the
-// first, or a bookkeeping array listed before the records would take it.
-function chooseRows(body: unknown, marks: string[], evidence: string[]): { path: string; rows: unknown[] } | undefined {
+// first, or a bookkeeping array listed before the records would take it. The
+// model may name the path; its hint breaks ties but never overrules evidence.
+type Rows = { path: string; rows: unknown[]; note?: string };
+function chooseRows(body: unknown, marks: string[], evidence: string[], hint: string | null | undefined): Rows | undefined {
   const candidates: { path: string; rows: unknown[] }[] = [];
   const isRecord = (x: unknown) => !!x && typeof x === 'object' && !Array.isArray(x)
     && Object.values(x).some((f) => f === null || typeof f !== 'object');
@@ -143,19 +148,26 @@ function chooseRows(body: unknown, marks: string[], evidence: string[]): { path:
     }
   };
   walk(body, '');
-  let best: { path: string; rows: unknown[]; score: number } | undefined;
-  for (const c of candidates) {
-    const text = norm(JSON.stringify(c.rows));
+  const scored = candidates.map((c) => {
+    const text = markKey(JSON.stringify(c.rows));
     let score = evidence.filter((ev) => text.includes(ev)).length;
     for (const m of marks) {
       if (c.rows.some((r) => [...leaves(r)].some(({ value }) => markMatches(value, m)))) score++;
     }
-    if (!best || score > best.score || (score === best.score && c.rows.length > best.rows.length)) best = { ...c, score };
+    return { ...c, score };
+  });
+  let best: (typeof scored)[number] | undefined;
+  for (const c of scored) {
+    if (!best || c.score > best.score || (c.score === best.score && c.rows.length > best.rows.length)) best = c;
   }
   // Evidence present but inside no candidate: the response is one record
   // (a summary, a detail) and a stray map of URLs must not pose as its rows.
-  if (best && best.score === 0 && (marks.length || evidence.length)) return undefined;
-  return best && { path: best.path, rows: best.rows };
+  if (best && best.score === 0 && (marks.length || evidence.length)) best = undefined;
+  if (!hint) return best && { path: best.path, rows: best.rows };
+  const hinted = scored.find((c) => c.path === hint);
+  if (hinted && hinted.score >= 1 && hinted.score === best?.score) return { path: hinted.path, rows: hinted.rows };
+  const note = `the proposed rows path "${hint}" ${hinted ? 'carries less of the evidence than' : 'is not a list of records; using'} ${best ? `"${best.path}"` : 'the whole response as one record'}`;
+  return best ? { path: best.path, rows: best.rows, note } : { path: '', rows: [], note };
 }
 
 function substituteUrl(url: string, values: Record<string, string>): string {
@@ -175,7 +187,7 @@ function substituteBody(node: unknown, values: Record<string, string>): unknown 
   return node;
 }
 
-type Verified = { rowsPath?: string; rowCount: number; evidenceHit?: string; columns?: Column[]; missing: string[] };
+type Verified = { rowsPath?: string; rowsNote?: string; rowCount: number; evidenceHit?: string; columns?: Column[]; missing: string[] };
 type TryResult = ({ ok: true } & Verified) | { ok: false; reason: string; snippet?: string };
 
 // Execute a proposal with the recorded values. Guard rails: allowlisted hosts
@@ -219,7 +231,8 @@ async function tryProposal(call: NonNullable<Proposal['call']>, hosts: string[],
   if (parsed === null || typeof parsed !== 'object') {
     return { ok: false, reason: 'response parsed to a bare value, not structured data', snippet: text.slice(0, 300) };
   }
-  const evidenceHit = evidence.find((ev) => norm(text).includes(ev));
+  const hay = markKey(text);
+  const evidenceHit = evidence.find((ev) => hay.includes(ev));
   if (evidence.length && !evidenceHit) {
     return {
       ok: false,
@@ -237,9 +250,9 @@ async function tryProposal(call: NonNullable<Proposal['call']>, hosts: string[],
       snippet: text.slice(0, 300),
     };
   }
-  const rows = chooseRows(parsed, marks, evidence);
-  const columns = locateColumns(parsed, rows?.path, marks);
-  return { ok: true, rowsPath: rows?.path || undefined, rowCount: rows?.rows.length ?? 1, evidenceHit, columns, missing };
+  const rows = chooseRows(parsed, marks, evidence, call.rowsPath);
+  const columns = locateColumns(parsed, rows?.path || undefined, marks);
+  return { ok: true, rowsPath: rows?.path || undefined, rowsNote: rows?.note, rowCount: rows?.path ? rows.rows.length : 1, evidenceHit, columns, missing };
 }
 
 function assembleSpec(call: NonNullable<Proposal['call']>, meta: Meta, a: Analysis, p: Proposal, v: Verified, mode: 'repair' | 'refine', feedback: string): Spec {
@@ -410,6 +423,7 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
       continue;
     }
 
+    if (result.rowsNote) emit('info', result.rowsNote);
     emit('ok', `verified: structured response, ${result.rowCount} row(s)${result.rowsPath ? ` at ${result.rowsPath}` : ''}` +
       (result.evidenceHit ? `, carrying the recorded evidence ("${result.evidenceHit}")` : '') +
       (result.columns ? `; columns from your marked selections: ${result.columns.map((c) => c.name).join(', ')}` : ''));
@@ -421,7 +435,7 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
         messages.push({ role: 'assistant', content: reply });
         messages.push({
           role: 'user',
-          content: `The proposal was executed with the recorded values. The response is structured and carries some of the operator's marked selections, but not: ${result.missing.map(shortMark).join(', ')}. Propose a call whose response also returns the missing marked text as plain field values, or stop with advice if no API can return it.`,
+          content: `The proposal was executed with the recorded values. The response is structured and carries some of the operator's marked selections (rows read at ${result.rowsPath ?? 'the whole response'}), but not: ${result.missing.map(shortMark).join(', ')}. Propose a call whose response also returns the missing marked text as plain field values, or stop with advice if no API can return it.`,
         });
         continue;
       }

@@ -205,7 +205,7 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
           if (done) break;
           buf += dec.decode(value, { stream: true });
           let i;
-          while ((i = buf.indexOf('\n')) >= 0) {
+          while ((i = buf.indexOf('\\n')) >= 0) {
             const l = buf.slice(0, i).trim();
             buf = buf.slice(i + 1);
             if (!l) continue;

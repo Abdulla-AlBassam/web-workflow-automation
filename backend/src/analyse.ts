@@ -176,21 +176,26 @@ export function norm(s: string): string {
   return s.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-// Marked text is compared to response fields with bracketed reference
-// markers dropped ([4], [a], [citation needed]): page text carries them, API
-// fields do not, and one marker would otherwise defeat a whole-paragraph match.
+// Marked text is compared to response fields on letters and digits only:
+// page text carries reference markers ([4], [a]), pronunciation glyphs and
+// typographic punctuation that API fields do not, and any one of them would
+// defeat a whole-paragraph match. Underscores stay, so a URL slug or a
+// canonical key ("German_language") never passes for the text itself.
 export function markKey(mark: string): string {
-  return norm(mark.replace(/\[[^\]]{1,20}\]/g, ''));
+  return norm(mark.replace(/\[[^\]]{1,20}\]/g, ' ').replace(/[^\p{L}\p{N}\s_]/gu, ' '));
 }
 
 // Does a field carry a marked selection? Exactly, or as a substring, or, for
-// a long selection that spilled past one field, by carrying its opening.
+// a long selection, by sharing an 80-character stretch with it: a summary
+// endpoint that drops a parenthetical clause still carries the paragraph.
 export function markMatches(value: unknown, mark: string): boolean {
   if (typeof value !== 'string' && typeof value !== 'number') return false;
   const v = markKey(String(value));
   const m = markKey(mark);
   if (!v || !m) return false;
-  return v === m || (m.length >= 8 && v.includes(m)) || (m.length > 80 && v.includes(m.slice(0, 80)));
+  if (v === m || (m.length >= 8 && v.includes(m))) return true;
+  for (let i = 0; i + 80 <= m.length; i += 40) if (v.includes(m.slice(i, i + 80))) return true;
+  return false;
 }
 
 export function responseHasMark(resBody: string | undefined, mark: string): boolean {
