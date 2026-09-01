@@ -117,15 +117,19 @@ function timelineRow(e: Record<string, unknown>): string {
 }
 
 export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record<string, unknown>[], spec: any | undefined): string {
-  const outcomeUrl = a.outcome?.url;
   // The operator's story, not the raw stream: keep actions, navigation, the
-  // outcome call and lifecycle markers; drop the dropdown-population noise.
+  // outcome calls (search, and the chained detail when present) and lifecycle
+  // markers; drop the dropdown-population noise.
+  const keepUrls = new Set([a.outcome?.url, a.chain?.call.url].filter(Boolean));
   const shown = events.filter((e) =>
-    e.kind !== 'net' && e.kind !== 'net_meta' ? true : e.url === outcomeUrl);
+    e.kind !== 'net' && e.kind !== 'net_meta' ? true : keepUrls.has(e.url as string));
   const timeline = `<ul class="tl">${shown.map(timelineRow).join('')}</ul>`;
 
   const outcome = a.outcome
     ? `<p class="sub">Outcome call: <span class="mono">${esc(a.outcome.method)} ${esc(url(a.outcome.url))}</span>, carrying the typed value <span class="mark mono">${esc(a.outcome.matches[0]?.value)}</span> at <span class="mono">${esc(a.outcome.matches[0]?.path)}</span>. ${esc(a.outcome.resultShape ?? '')}.</p>`
+      + (a.chain
+        ? `<p class="sub" style="margin-top:4px">Chained: the value at <span class="mono">${esc(a.chain.linkPath)}</span> in its response feeds <span class="mono">${esc(a.chain.call.method)} ${esc(url(a.chain.call.url))}</span>, the true outcome — the run re-resolves that link for every new input.</p>`
+        : '')
     : `<p class="note">${esc(a.notes.join(' ') || 'No parameterised outcome call identified.')}</p>`;
 
   const callRows = a.calls.map((c) => `<tr>

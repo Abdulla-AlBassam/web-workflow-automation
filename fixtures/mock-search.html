@@ -23,6 +23,10 @@
     <thead><tr><th>CR No.</th><th>Name</th><th>Status</th></tr></thead>
     <tbody></tbody>
   </table>
+  <div id="bio" hidden>
+    <h2 id="bio_name"></h2>
+    <p id="bio_text"></p>
+  </div>
   <script>
     document.getElementById('btn_search').addEventListener('click', async () => {
       // Cross-hostname noise call: the recorder allowlists 127.0.0.1, so this
@@ -39,10 +43,22 @@
       tbody.innerHTML = '';
       for (const r of data.RECORDS) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${r.CR_NO}</td><td>${r.NAME_EN}</td><td>${r.STATUS}</td>`;
+        tr.innerHTML = `<td>${r.CR_NO}</td><td><a href="#" data-cr="${r.CR_NO}">${r.NAME_EN}</a></td><td>${r.STATUS}</td>`;
         tbody.appendChild(tr);
       }
       document.getElementById('results').hidden = false;
+    });
+
+    // Detail view, like a profile page: clicking a result fetches its bio.
+    document.querySelector('#results tbody').addEventListener('click', async (e) => {
+      const cr = e.target.dataset?.cr;
+      if (!cr) return;
+      e.preventDefault();
+      const res = await fetch(`/api/company/${cr}`);
+      const c = await res.json();
+      document.getElementById('bio_name').textContent = c.NAME_EN;
+      document.getElementById('bio_text').textContent = c.BIO;
+      document.getElementById('bio').hidden = false;
     });
   </script>
 </body>

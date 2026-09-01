@@ -2,6 +2,7 @@
 // requests where the spec says so, a browser step only for what a request
 // cannot reach. Validates the outcome and stops with a named reason on any
 // mismatch — it never reports a failed run as a success.
+import { leaves, norm } from '../../backend/src/analyse.js';
 import type { Spec, Step } from '../../backend/src/generate.js';
 
 export type RunResult = {
@@ -26,6 +27,25 @@ function setPath(obj: unknown, path: string, value: unknown) {
 
 const PAGE_DELAY_MS = 400;
 const MAX_PAGES = 50;
+
+// Which record does the chain follow for a new input? The one that best
+// matches the run's parameter values; ties and no-matches take the first row,
+// mirroring how result lists rank the best hit on top.
+function pickRow(rows: unknown[], params: Record<string, string>): unknown {
+  const values = Object.values(params).map(norm).filter(Boolean);
+  let best = rows[0];
+  let bestScore = 0;
+  for (const row of rows) {
+    let score = 0;
+    for (const { value } of leaves(row)) {
+      if (typeof value !== 'string' && typeof value !== 'number') continue;
+      const s = norm(String(value));
+      for (const v of values) if (s.includes(v)) score++;
+    }
+    if (score > bestScore) { bestScore = score; best = row; }
+  }
+  return best;
+}
 
 function substitute(template: unknown, params: Record<string, string>): unknown {
   if (Array.isArray(template)) return template.map((v) => substitute(v, params));
@@ -52,6 +72,7 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
 
   let finalResponse: { httpStatus: number; body: unknown } | undefined;
   let outcomeRequest: { url: string; method: string; headers: Record<string, string>; body: unknown } | undefined;
+  const responses: Record<string, unknown> = {};
 
   for (const step of spec.steps) {
     if (step.type === 'browser-token') {
@@ -64,8 +85,33 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
       bearers[step.id] = tok.bearer;
       steps.push({ id: step.id, type: step.type, detail: `token from ${tok.source} (${tok.bearer.length} chars)` });
     } else {
+      // Chained step: resolve the link value from the previous step's fresh
+      // response before parameter substitution touches the URL.
+      let linkNote = '';
+      let stepUrl = step.url;
+      if (step.link) {
+        const src = responses[step.link.fromStep];
+        if (src === undefined) {
+          return { ok: false, stoppedReason: `chain step "${step.id}" links from "${step.link.fromStep}", which did not run`, steps };
+        }
+        let source: unknown = src;
+        if (step.link.rowsPath) {
+          const rows = resolvePath(src, step.link.rowsPath);
+          if (!Array.isArray(rows) || rows.length === 0) {
+            return { ok: false, stoppedReason: `chain step "${step.id}": no records at ${step.link.rowsPath} to follow — the search returned nothing`, steps };
+          }
+          source = pickRow(rows, params);
+        }
+        const linkVal = resolvePath(source, step.link.path);
+        if (linkVal === undefined || linkVal === null) {
+          return { ok: false, stoppedReason: `chain step "${step.id}": no value at ${step.link.path} to follow`, steps };
+        }
+        const sub = step.link.encoded ? encodeURIComponent(String(linkVal)) : String(linkVal);
+        stepUrl = stepUrl.split('{{link}}').join(sub);
+        linkNote = ` (followed ${step.link.path}=${String(linkVal).slice(0, 40)})`;
+      }
       // URL placeholders take the parameter URL-encoded; body values go raw.
-      const url = step.url.replace(/\{\{(\w+)\}\}/g, (_, n) => encodeURIComponent(params[n] ?? ''));
+      const url = stepUrl.replace(/\{\{(\w+)\}\}/g, (_, n) => encodeURIComponent(params[n] ?? ''));
       const body = step.bodyTemplate === undefined ? undefined : substitute(step.bodyTemplate, params);
       const payload = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
       const headers: Record<string, string> = { ...step.headers };
@@ -83,9 +129,10 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
       const text = await res.text();
       let parsed: unknown;
       try { parsed = JSON.parse(text); } catch { parsed = text; }
+      responses[step.id] = parsed;
       finalResponse = { httpStatus: res.status, body: parsed };
       outcomeRequest = { url, method: step.method, headers, body };
-      steps.push({ id: step.id, type: step.type, detail: `${step.method} → HTTP ${res.status}` });
+      steps.push({ id: step.id, type: step.type, detail: `${step.method} → HTTP ${res.status}${linkNote}` });
     }
   }
 
@@ -142,6 +189,12 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
     }
     extracted.records = { count: all.length, rows: all };
     steps.push({ id: 'paginate', type: 'pagination', detail: `fetched ${page} pages, ${all.length} of ${total} rows` });
+  }
+
+  // An outcome that is one object (a detail page's data) still renders and
+  // exports as a table: one row, the whole response.
+  if (!extracted.records && finalResponse.body && typeof finalResponse.body === 'object' && !Array.isArray(finalResponse.body)) {
+    extracted.records = { count: 1, rows: [finalResponse.body] };
   }
 
   // Marked-column projection: the operator highlighted what they wanted, so

@@ -79,8 +79,16 @@ try {
   // Highlight the first result's name: the mark chip must appear, and clicking
   // it must record the selection as wanted data.
   await page.click('#results tbody tr td:nth-child(2)', { clickCount: 3 });
-  const chipEl = await page.waitForSelector('[data-wfr="chip"]', { timeout: 3000 });
-  await chipEl.click();
+  await page.waitForTimeout(300); // each mouseup re-renders the chip; let it settle
+  await page.click('[data-wfr="chip"]');
+
+  // Follow the result into its detail view and mark the bio: the recording now
+  // carries a chained workflow (search → detail).
+  await page.click('#results tbody a');
+  await page.waitForSelector('#bio:not([hidden])');
+  await page.click('#bio_text', { clickCount: 3 });
+  await page.waitForTimeout(300);
+  await page.click('[data-wfr="chip"]');
   await page.waitForTimeout(600); // let the recorder's 250ms batch flush drain
 
   const stopped = await sw.evaluate(() => globalThis.wfr.stop());
@@ -119,6 +127,19 @@ try {
   check('seq strictly increasing, no gaps',
     seqs.every((s, i) => i === 0 || s === seqs[i - 1] + 1) && dump.integrity.seqGaps.length === 0,
     `gaps: ${JSON.stringify(dump.integrity.seqGaps)}`);
+
+  // Full pipeline on this real recording: the generated spec chains the search
+  // into the detail call, and a fresh input replays end to end.
+  const spec = await fetch(`${BACKEND}/api/sessions/${SESSION}/spec`, { method: 'POST' }).then((r) => r.json());
+  check('chained spec generated from the live recording', spec.steps?.some((s) => s.link), JSON.stringify(spec.steps ?? spec));
+  check('marked bio becomes a column', spec.outcome?.columns?.some((c) => c.name === 'BIO'), JSON.stringify(spec.outcome?.columns));
+  const replay = await fetch(`${BACKEND}/api/sessions/${SESSION}/run`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ params: { cr_number: '84121' } }),
+  }).then((r) => r.json());
+  check('chained replay with a new input returns its bio',
+    replay.ok && /cold-storage/.test(replay.extracted?.records?.rows?.[0]?.BIO ?? ''),
+    replay.stoppedReason ?? JSON.stringify(replay.extracted?.records?.rows));
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

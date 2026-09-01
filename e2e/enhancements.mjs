@@ -152,6 +152,46 @@ try {
     Object.keys(markedRun.extracted.records.rows[0]).length === 1,
     markedRun.stoppedReason ?? JSON.stringify(markedRun.extracted?.records?.rows));
 
+  // Chained workflow (the wwe.com shape): the search response's CR number
+  // feeds a detail call, and the marked bio lives in the detail response.
+  const awalBio = 'Awal Trading opened its first Manama storefront in 1978 and now supplies building materials across the Northern Governorate.';
+  await api('/api/sessions', { session: 'chain', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/chain/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'awal', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/CRdetails/AdvanceSearchCR_Paging`, status: 200,
+      reqBody: JSON.stringify({ CR_NAME_EN: 'awal', PAGE: 1 }),
+      resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L' }] }), seq: 3 },
+    { kind: 'action', action: 'click', target: { tag: 'a', text: 'Awal Trading Co. W.L.L' }, seq: 4 },
+    { kind: 'net', method: 'GET', url: `${MOCK}/api/company/139867`, status: 200,
+      resBody: JSON.stringify({ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L', STATUS: 'ACTIVE', BIO: awalBio }), seq: 5 },
+    { kind: 'action', action: 'mark', text: 'Awal Trading Co. W.L.L', seq: 6 },
+    { kind: 'action', action: 'mark', text: awalBio, seq: 7 },
+    { kind: 'session_stop', seq: 8 },
+  ]});
+  await api('/api/sessions/chain/stop', {});
+  const chainSpec = await api('/api/sessions/chain/spec', {});
+  const detailStep = chainSpec.steps?.find((s) => s.link);
+  check('chain detected: detail step follows the search',
+    !!detailStep && detailStep.link.rowsPath === 'RECORDS' && detailStep.link.path === 'CR_NO' &&
+    detailStep.url.includes('{{link}}'),
+    JSON.stringify(chainSpec.steps));
+  check('outcome moves to the chained call with marked columns',
+    chainSpec.outcome?.fromStep === 'detail' &&
+    chainSpec.outcome.columns?.some((c) => c.path === 'BIO') &&
+    chainSpec.outcome.columns?.some((c) => c.path === 'NAME_EN'),
+    JSON.stringify(chainSpec.outcome));
+  const chainRun = await api('/api/sessions/chain/run', { params: { cr_name_en: 'manama' } });
+  check('chained replay resolves the link for a new input',
+    chainRun.ok &&
+    chainRun.extracted?.records?.rows?.[0]?.NAME_EN === 'Manama Foods B.S.C' &&
+    /cold-storage/.test(chainRun.extracted.records.rows[0].BIO ?? ''),
+    chainRun.stoppedReason ?? JSON.stringify(chainRun.extracted?.records?.rows));
+  const chainMiss = await api('/api/sessions/chain/run', { params: { cr_name_en: 'zzz-no-such' } });
+  check('empty search stops the chain with a named reason',
+    !chainMiss.ok && /no records at RECORDS/.test(chainMiss.stoppedReason ?? ''), chainMiss.stoppedReason);
+
   // A spec saved by an older generator (no pagination, old version) must be
   // regenerated before use, not executed as-is.
   const specPath = join(dataDir, 'enh', 'spec.json');

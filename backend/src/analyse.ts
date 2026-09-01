@@ -14,11 +14,23 @@ export type Call = {
   url: string;
   method: string;
   status: number;
+  seq: number;
   reqBody?: string;
   resBody?: string;
   matches: Match[];      // input values found inside this request
   resultShape?: string;  // short description of the response payload when structured
   outcomeScore: number;
+};
+
+// A chained workflow: a value from the search response (a slug, an id) appears
+// in a later request's URL, and that later response is where the operator's
+// marked data lives. The later call is the true outcome; the search feeds it.
+export type Chain = {
+  call: Call;            // the final outcome call
+  linkPath: string;      // where the link value lives in the search response (row-relative when rowsPath set)
+  rowsPath?: string;     // the search response's record set, when the link came from a row
+  linkToken: string;     // the exact URL substring that matched
+  encoded: boolean;      // whether the URL carried it percent-encoded
 };
 
 export type Analysis = {
@@ -29,6 +41,7 @@ export type Analysis = {
   marks: string[];       // text the operator highlighted as wanted data
   calls: Call[];
   outcome?: Call;
+  chain?: Chain;
   authHint?: string;
   notes: string[];
 };
@@ -103,6 +116,57 @@ function describeResult(resBody: string | undefined): { shape?: string; records:
   return best ? { shape: `${best} records at ${where}`, records: best } : { records: 0 };
 }
 
+export function norm(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+export function responseHasMark(resBody: string | undefined, mark: string): boolean {
+  const parsed = parseBody(resBody);
+  if (parsed === undefined || parsed === null || typeof parsed !== 'object') return false;
+  const m = norm(mark);
+  for (const { value } of leaves(parsed)) {
+    if (typeof value !== 'string' && typeof value !== 'number') continue;
+    const v = norm(String(value));
+    if (v === m || (m.length >= 8 && v.includes(m))) return true;
+  }
+  return false;
+}
+
+// The same trick as input correlation, one level deeper: a value from call A's
+// response appearing in call B's URL is the click that connected them.
+function findLink(a: Call, b: Call): Omit<Chain, 'call'> | undefined {
+  const parsed = parseBody(a.resBody);
+  if (parsed === undefined || parsed === null || typeof parsed !== 'object') return undefined;
+  const recordsPath = a.resultShape?.match(/at ([\w.]+)$/)?.[1];
+  let best: (Omit<Chain, 'call'> & { len: number }) | undefined;
+  for (const { path, value } of leaves(parsed)) {
+    if (typeof value !== 'string' && typeof value !== 'number') continue;
+    const s = String(value);
+    if (s.length < 4) continue;
+    if (a.url.includes(s)) continue; // shared constants (hosts, base paths) are not links
+    for (const [token, encoded] of [[s, false], [encodeURIComponent(s), true]] as const) {
+      if (encoded && token === s) break;
+      if (!b.url.includes(token)) continue;
+      if (!best || s.length > best.len) {
+        let linkPath = path;
+        let rowsPath: string | undefined;
+        if (recordsPath && path.startsWith(recordsPath + '.')) {
+          rowsPath = recordsPath;
+          linkPath = path.slice(recordsPath.length + 1).replace(/^\d+\.?/, '');
+        }
+        best = { linkPath, rowsPath, linkToken: token, encoded, len: s.length };
+      }
+      break;
+    }
+  }
+  return best && { linkPath: best.linkPath, rowsPath: best.rowsPath, linkToken: best.linkToken, encoded: best.encoded };
+}
+
+function isStructured(resBody: string | undefined): boolean {
+  const parsed = parseBody(resBody);
+  return parsed !== undefined && parsed !== null && typeof parsed === 'object';
+}
+
 export function analyse(trace: Trace): Analysis {
   const notes: string[] = [];
   const events = trace.events;
@@ -128,6 +192,7 @@ export function analyse(trace: Trace): Analysis {
       const outcomeScore = (matches.length ? 100 : 0) + (ok ? 10 : 0) + Math.min(records, 50);
       return {
         url: e.url as string, method: (e.method as string) ?? 'GET', status: (e.status as number) ?? 0,
+        seq: (e.seq as number) ?? 0,
         reqBody: e.reqBody as string, resBody: e.resBody as string,
         matches, resultShape: shape, outcomeScore,
       };
@@ -135,6 +200,30 @@ export function analyse(trace: Trace): Analysis {
 
   const ranked = [...calls].sort((a, b) => b.outcomeScore - a.outcomeScore);
   const outcome = ranked[0]?.matches.length ? ranked[0] : undefined;
+
+  // Chain detection needs positive evidence, never a guess: a marked value
+  // found in the later response, or a recorded click leading to it.
+  let chain: Chain | undefined;
+  if (outcome) {
+    const clickSeqs = events
+      .filter((e) => e.kind === 'action' && e.action === 'click' && typeof e.seq === 'number')
+      .map((e) => e.seq as number);
+    let bestScore = 0;
+    for (const b of calls) {
+      if (b === outcome || b.seq <= outcome.seq) continue;
+      if (b.status < 200 || b.status >= 300 || !isStructured(b.resBody)) continue;
+      const link = findLink(outcome, b);
+      if (!link) continue;
+      const markHit = marks.some((m) => responseHasMark(b.resBody, m));
+      const clickBetween = clickSeqs.some((s) => s > outcome.seq && s < b.seq);
+      if (!markHit && !clickBetween) continue;
+      const score = (markHit ? 100 : 0) + (clickBetween ? 10 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        chain = { call: b, ...link };
+      }
+    }
+  }
 
   if (!inputs.length) notes.push('No operator input values captured — nothing to parameterise.');
   if (!calls.length) notes.push('No same-site network calls captured — outcome may be pure DOM, browser steps required.');
@@ -146,5 +235,5 @@ export function analyse(trace: Trace): Analysis {
     notes.push(authHint);
   }
 
-  return { session: trace.meta.session, status: trace.meta.status, language, inputs, marks, calls, outcome, authHint, notes };
+  return { session: trace.meta.session, status: trace.meta.status, language, inputs, marks, calls, outcome, chain, authHint, notes };
 }

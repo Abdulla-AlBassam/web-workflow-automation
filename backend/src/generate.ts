@@ -1,8 +1,8 @@
-import { leaves, type Analysis, type Call, type Match } from './analyse.js';
+import { leaves, norm, type Analysis, type Call, type Match } from './analyse.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 5;
+export const SPEC_VERSION = 6;
 
 export type Spec = {
   version: number;
@@ -30,8 +30,11 @@ export type Step =
   // the spec records only where to load from and why the step exists.
   | { id: string; type: 'browser-token'; loadUrl: string; reason: string }
   // url may contain {{param}} placeholders (URL-encoded at run time); GET
-  // workflows have no bodyTemplate at all.
-  | { id: string; type: 'request'; method: string; url: string; headers: Record<string, string>; bearerFrom?: string; bodyTemplate?: unknown };
+  // workflows have no bodyTemplate at all. A step with `link` is chained: its
+  // URL's {{link}} placeholder is filled from an earlier step's response — the
+  // value at `path`, inside the picked record when rowsPath is set.
+  | { id: string; type: 'request'; method: string; url: string; headers: Record<string, string>; bearerFrom?: string; bodyTemplate?: unknown;
+      link?: { fromStep: string; rowsPath?: string; path: string; pick: 'best-match'; encoded: boolean } };
 
 // Replace matched leaf values with {{name}} everywhere they appear, so nested
 // DataTables payloads survive. Value-matched, not path-matched, on purpose.
@@ -93,10 +96,6 @@ function extractionPaths(call: Call): Record<string, string> {
     if (/total/i.test(key) && !Number.isNaN(Number(value))) { out.total = path; break; }
   }
   return out;
-}
-
-function norm(s: string): string {
-  return s.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 // Marked text is evidence, not the extraction itself: find where each marked
@@ -194,9 +193,39 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     ...(bodyTemplate !== undefined ? { bodyTemplate } : {}),
   });
 
-  const extract = extractionPaths(outcome);
-  const pagination = detectPagination(outcome, extract);
-  const columns = markColumns(outcome, extract.records, analysis.marks);
+  // Chained workflow: the true outcome is the later call the search fed. The
+  // runner re-resolves the link per run from the search step's fresh response.
+  const chain = analysis.chain;
+  const final = chain?.call ?? outcome;
+  if (chain) {
+    let detailBody: unknown;
+    if (chain.call.reqBody) {
+      try { detailBody = JSON.parse(chain.call.reqBody); } catch { detailBody = chain.call.reqBody; }
+    }
+    steps.push({
+      id: 'detail',
+      type: 'request',
+      method: chain.call.method,
+      url: chain.call.url.split(chain.linkToken).join('{{link}}'),
+      headers: {
+        accept: '*/*',
+        ...(detailBody !== undefined ? { 'content-type': 'application/json; charset=utf-8' } : {}),
+      },
+      ...(needsAuth ? { bearerFrom: 'token' } : {}),
+      ...(detailBody !== undefined ? { bodyTemplate: detailBody } : {}),
+      link: {
+        fromStep: 'search',
+        ...(chain.rowsPath ? { rowsPath: chain.rowsPath } : {}),
+        path: chain.linkPath,
+        pick: 'best-match',
+        encoded: chain.encoded,
+      },
+    });
+  }
+
+  const extract = extractionPaths(final);
+  const pagination = chain ? undefined : detectPagination(final, extract);
+  const columns = markColumns(final, extract.records, analysis.marks);
   return {
     version: SPEC_VERSION,
     name: opts.name,
@@ -205,8 +234,8 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     parameters: groups.map((g) => ({ name: g.name, example: g.value, required: true })),
     steps,
     outcome: {
-      fromStep: 'search',
-      expect: outcomeExpectation(outcome),
+      fromStep: chain ? 'detail' : 'search',
+      expect: outcomeExpectation(final),
       extract,
       ...(columns ? { columns } : {}),
       ...(pagination ? { pagination } : {}),

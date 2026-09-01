@@ -67,7 +67,9 @@ async function autoSpec(id: string) {
   if (!a?.outcome) return undefined;
   const page = readEvents(id).find((e) => e.kind === 'page' && typeof e.url === 'string');
   const loadUrl = (page?.url as string) ?? a.outcome.url;
-  const probeStatus = await probeAuth(a.outcome).catch(() => undefined);
+  // The auth probe targets the call the run actually depends on: the chained
+  // detail call when there is one, the search call otherwise.
+  const probeStatus = await probeAuth(a.chain?.call ?? a.outcome).catch(() => undefined);
   const spec = toSpec(a, { name: id, origin: new URL(loadUrl).origin, loadUrl, probeStatus });
   saveSpec(id, spec);
   return spec;

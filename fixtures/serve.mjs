@@ -19,6 +19,17 @@ const COMPANIES = [
 
 const PER_PAGE = 2;
 
+// Detail-page data for the chained workflow: search → pick a company → bio.
+const BIOS = {
+  '139867': 'Awal Trading opened its first Manama storefront in 1978 and now supplies building materials across the Northern Governorate.',
+  '84121': 'Manama Foods runs three cold-storage facilities and imports produce for restaurants across the capital.',
+  '20775': 'Gulf Line Logistics operated freight forwarding between Bahrain and the Eastern Province until its deletion.',
+  '91230': 'Delmon Trading distributes household goods to independent retailers in Muharraq and Riffa.',
+  '77012': 'Muharraq Trading Est. is a family-run supplier of marine equipment near the old dhow harbour.',
+  '65440': 'Riffa Trading House wholesales textiles and has traded from the same souq address since 1985.',
+  '58019': 'Isa Town Trading Co. sold school and office supplies before winding down operations.',
+};
+
 const page = readFileSync(join(import.meta.dirname, 'mock-search.html'), 'utf8');
 
 createServer((req, res) => {
@@ -45,6 +56,13 @@ createServer((req, res) => {
     const hits = COMPANIES.filter((c) => c.NAME_EN.toLowerCase().includes(q.toLowerCase()));
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ TOTAL: hits.length, RECORDS: hits }));
+  } else if (req.method === 'GET' && /^\/api\/company\/\d+$/.test(req.url)) {
+    // Chained detail call: the id arrives in the URL path, like a profile page.
+    const id = req.url.split('/').at(-1);
+    const c = COMPANIES.find((x) => x.CR_NO === id);
+    if (!c) { res.writeHead(404).end(); return; }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ CR_NO: c.CR_NO, NAME_EN: c.NAME_EN, STATUS: c.STATUS, BIO: BIOS[c.CR_NO] ?? '' }));
   } else if (req.method === 'GET' && req.url === '/noise') {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
     res.end('{"noise":true}');
