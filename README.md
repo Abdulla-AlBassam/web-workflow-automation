@@ -12,9 +12,9 @@ what a plain request cannot reach.
 Demonstrated on the public Sijilat commercial-registry lookup. Also run
 against wwe.com and the Swiss company register (zefix.ch) deterministically;
 Wikipedia both ways (deterministic from the site's search box, through the
-LLM assistant from the JSONP portal); Nominatim and Hacker News search
-through the assistant, each fixed in two turns. Nothing in the pipeline
-names any site. An example Sijilat session export and its generated spec
+LLM assistant from the JSONP portal); Nominatim, Hacker News search and the
+UK Companies House register through the assistant, each fixed in a few
+turns. Nothing in the pipeline names any site. An example Sijilat session export and its generated spec
 are in `fixtures/`.
 
 ## How it works
@@ -118,7 +118,8 @@ The pipeline refuses; the assistant can recover:
 - Responses over 2 MB. Cut and declared; the assistant fetches them in
   full. Live: Nominatim.
 - Server-rendered result lists. The assistant drives a browser page and
-  reads the list. Suite only.
+  reads the list, or finds the JSON the page can be asked for. Live: UK
+  Companies House.
 - Nothing typed but something marked. The assistant derives a
   zero-parameter automation from the marks. Suite only.
 - Values transformed before sending (a date as an epoch, a choice as an
@@ -189,8 +190,9 @@ verified replacement overwrites the old one with its provenance shown on the
 page.
 
 Rails: 16 model turns, 20 tool calls, 6 script attempts, a token ceiling,
-and a repeated identical call refused from its third occurrence. The console
-reports the estimated spend. Default model `claude-sonnet-5`; `REPAIR_MODEL`
+and a repeated identical call refused from its third occurrence. A Stop
+button ends the loop at once; a partly verified attempt is kept, nothing
+else is saved. The console reports the estimated spend. Default model `claude-sonnet-5`; `REPAIR_MODEL`
 overrides it. Put `ANTHROPIC_API_KEY=...` in a `.env` file at the project
 root and restart the backend. This is the only part of the tool that sends
 anything off the machine, and it sends the sanitised recording.
