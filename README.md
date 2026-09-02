@@ -108,8 +108,8 @@ npm run backend          # http://127.0.0.1:4823
 
 ### Record and run
 
-1. Open the target page, click the extension icon, check the host allowlist,
-   **Start**.
+1. Open the target page, click the extension icon, check the site name (it
+   labels the session; capture is not limited to it), **Start**.
 2. Perform the workflow once, exactly as a user would. To choose output
    fields, highlight the data you care about and click the **Mark data** chip
    that appears; a drag across a whole block marks its container, which
@@ -274,7 +274,7 @@ The division of labour is strict. The model investigates and writes;
 deterministic code decides.
 
 The model receives the whole recording (every event, with every captured
-body reachable in full) plus the analyser's verdict, and four tools:
+body reachable in full) plus the analyser's verdict, and these tools:
 
 - **read_body** reads any captured request or response body, page by page.
 - **probe** sends one HTTP request and returns the whole response: an API
@@ -346,9 +346,10 @@ of the tool that leaves the machine.
   two-layer (extension, then backend) and asserted by the e2e suite. Every
   fetch/XHR the page makes is captured, whatever the host; third-party
   bodies stay on the machine like everything else.
-- Session scripts run in an isolated context with two capabilities (HTTP
-  without credentials, a browser page), are confined to the hosts they were
-  verified against, and are shown in full on the session page. This is
+- Session scripts run in an isolated context with three capabilities (HTTP,
+  a browser page, and the anonymous bearer the site itself issues, the only
+  credential they can send), are confined to the hosts they were verified
+  against, and are shown in full on the session page. This is
   isolation against accidents, not a hardened sandbox: the code comes from
   the assistant under the tool's instructions and is saved only after it
   reproduced the recording.
