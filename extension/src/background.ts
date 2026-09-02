@@ -85,13 +85,17 @@ async function start(opts: { session: string; hosts: string[]; tabId: number }) 
 async function stop() {
   const state = await getState();
   if (!state.on) return { ok: false, error: 'not recording' };
+  // The tab takes its final page snapshot on this message; give its batch
+  // time to arrive before the stop marker seals the session.
+  await chrome.tabs.sendMessage(state.tabId, { type: 'set-state', on: false, hosts: [] }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 600));
+  await chain;
   await deliver([{ kind: 'session_stop', t: Date.now() }]);
   await fetch(`${BACKEND}/api/sessions/${encodeURIComponent(state.session)}/stop`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ stoppedAt: Date.now() }),
   }).catch(() => {});
-  await chrome.tabs.sendMessage(state.tabId, { type: 'set-state', on: false, hosts: [] }).catch(() => {});
   await setState({ ...IDLE });
   await chrome.action.setBadgeText({ text: '' });
   return { ok: true };

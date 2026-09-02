@@ -5,6 +5,8 @@
 
 const REQ_CAP = 256 * 1024;
 const RES_CAP = 2 * 1024 * 1024;
+const SNAP_TEXT_CAP = 200 * 1024;
+const SNAP_HTML_CAP = 600 * 1024;
 const FORBIDDEN_KEYS = /cookie|authorization|x-api-key|bearer/i;
 
 // Headers the browser manages on its own (or that node's fetch sets from the
@@ -38,11 +40,11 @@ export function hostAllowed(url: unknown, hosts: string[]): boolean {
 
 // A body over the cap is cut and the cut declared (the full length kept
 // alongside), never silently shortened.
-function capBody(out: Record<string, unknown>, key: 'reqBody' | 'resBody', limit: number) {
+function capBody(out: Record<string, unknown>, key: 'reqBody' | 'resBody' | 'text' | 'html', limit: number) {
   const v = out[key];
   if (typeof v !== 'string' || v.length <= limit) return;
-  const flag = key === 'reqBody' ? 'reqTruncated' : 'resTruncated';
-  out[flag] = Math.max(Number(out[flag]) || 0, v.length);
+  const flag = key === 'reqBody' ? 'reqTruncated' : key === 'resBody' ? 'resTruncated' : key === 'text' ? 'textTruncated' : 'htmlTruncated';
+  out[flag] = key === 'html' ? true : Math.max(Number(out[flag]) || 0, v.length);
   out[key] = v.slice(0, limit);
 }
 
@@ -63,6 +65,11 @@ export function sanitise(evt: Record<string, unknown>, _hosts: string[]): Record
     if (typeof out.url !== 'string' || !/^https?:\/\//.test(out.url)) return undefined;
     capBody(out, 'reqBody', REQ_CAP);
     capBody(out, 'resBody', RES_CAP);
+  }
+  if (out.kind === 'snapshot') {
+    if (typeof out.url !== 'string') return undefined;
+    capBody(out, 'text', SNAP_TEXT_CAP);
+    capBody(out, 'html', SNAP_HTML_CAP);
   }
   return out;
 }

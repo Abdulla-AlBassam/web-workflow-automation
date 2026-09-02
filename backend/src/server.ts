@@ -1,7 +1,8 @@
 import Fastify from 'fastify';
 import { existsSync, readFileSync } from 'node:fs';
-import { appendEvents, createSession, getMeta, getScript, getSpec, listSessions, readEvents, saveMeta, saveSpec, status } from './store.js';
+import { appendEvents, appendLog, createSession, getMeta, getScript, getSpec, listSessions, readEvents, readLog, saveMeta, saveSpec, status } from './store.js';
 import { repairSession } from './repair.js';
+import { Inbox, maxEffort } from './effort.js';
 
 // Local secrets (ANTHROPIC_API_KEY for the repair assistant) live in the
 // project's .env, which is gitignored. Environment always wins.
@@ -204,6 +205,66 @@ app.post('/api/sessions/:id/repair/stop', async (req) => {
   return { stopped: running !== undefined };
 });
 
+// Maximum Effort Mode: the same live NDJSON stream, plus a conversation. The
+// operator's messages arrive on a second route and are handed to the loop
+// through its inbox; the stream stays open while the model waits for them.
+// Every line is also kept in the session folder so the page can show the
+// conversation again after a reload (streamed deltas are joined per block).
+const efforts = new Map<string, { abort: AbortController; inbox: Inbox }>();
+app.post('/api/sessions/:id/effort', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  if (!getMeta(id)) return reply.code(404).send({ error: 'unknown session' });
+  const { goal } = (req.body ?? {}) as { goal?: string };
+  if (efforts.has(id)) return reply.code(409).send({ error: 'Maximum Effort Mode is already running for this session' });
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
+  let block: { kind: string; text: string } | undefined;
+  const flush = () => { if (block && block.text.trim()) appendLog(id, { ...block, t: Date.now() }); block = undefined; };
+  const emit = (kind: string, text: string, extra?: Record<string, unknown>) => {
+    raw.write(JSON.stringify({ kind, text, ...extra }) + '\n');
+    if (extra?.delta) {
+      if (!block || block.kind !== kind) { flush(); block = { kind, text: '' }; }
+      block.text += text;
+      return;
+    }
+    flush();
+    if (kind !== 'block' && kind !== 'llm') appendLog(id, { kind, text, t: Date.now() });
+  };
+  const abort = new AbortController();
+  raw.on('close', () => abort.abort());
+  const inbox = new Inbox();
+  efforts.set(id, { abort, inbox });
+  appendLog(id, { kind: 'start', text: new Date().toISOString(), t: Date.now() });
+  try {
+    await maxEffort(id, emit, abort.signal, { goal: String(goal ?? '').slice(0, 4000), inbox, readToken: cachedReadToken });
+  } catch (e) {
+    emit('error', (e as Error).message);
+  } finally {
+    flush();
+    efforts.delete(id);
+  }
+  raw.end();
+});
+
+app.post('/api/sessions/:id/effort/say', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const running = efforts.get(id);
+  if (!running) return reply.code(409).send({ error: 'Maximum Effort Mode is not running for this session' });
+  const { text } = (req.body ?? {}) as { text?: string };
+  const clean = String(text ?? '').trim().slice(0, 4000);
+  if (!clean) return reply.code(400).send({ error: 'text required' });
+  running.inbox.push(clean);
+  return { ok: true };
+});
+
+app.post('/api/sessions/:id/effort/stop', async (req) => {
+  const { id } = req.params as { id: string };
+  const running = efforts.get(id);
+  running?.abort.abort();
+  return { stopped: running !== undefined };
+});
+
 // Tokens are cached per origin so bulk runs pay the browser-launch cost once,
 // not per row. Sijilat's anonymous token lives much longer than ten minutes.
 const tokenCache = new Map<string, { tok: Bearer; at: number }>();
@@ -247,7 +308,7 @@ app.get('/session/:id', async (req, reply) => {
   reply.type('text/html');
   const spec = await freshSpec(id) as { steps?: { type: string; file?: string }[] } | undefined;
   const scriptStep = spec?.steps?.find((s) => s.type === 'script');
-  return renderDetail(meta, status(meta), a, events, spec, scriptStep?.file ? getScript(id, scriptStep.file) : undefined);
+  return renderDetail(meta, status(meta), a, events, spec, scriptStep?.file ? getScript(id, scriptStep.file) : undefined, readLog(id));
 });
 
 const port = Number(process.env.PORT ?? 4823);

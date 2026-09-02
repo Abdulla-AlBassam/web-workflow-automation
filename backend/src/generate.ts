@@ -28,7 +28,9 @@ export type Spec = {
   // deterministic generator. Such specs are never auto-regenerated: the
   // generator would only refuse again. Mode "refine" means the loop replaced
   // an automation whose runs the operator flagged, with their note if given.
-  repaired?: { at: string; model: string; diagnosis: string; mode?: 'repair' | 'refine'; feedback?: string; summary?: string };
+  // Mode "effort" is Maximum Effort Mode: the operator's goal is kept in
+  // `feedback`, the model's account of the automation in `summary`.
+  repaired?: { at: string; model: string; diagnosis: string; mode?: 'repair' | 'refine' | 'effort'; feedback?: string; summary?: string };
 };
 
 export type Column = { name: string; path: string; scope: 'row' | 'body' };

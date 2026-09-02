@@ -24,7 +24,7 @@ function push(evt: Evt) {
   buffer.push({ ...evt, t: Date.now() });
   // A large captured body travels alone, so one batch never grows past what
   // the worker and the backend accept in a single message.
-  const big = typeof evt.resBody === 'string' && evt.resBody.length > 200 * 1024;
+  const big = (typeof evt.resBody === 'string' && evt.resBody.length > 200 * 1024) || evt.kind === 'snapshot';
   if (buffer.length >= 20 || big) flush();
   else if (flushTimer === undefined) flushTimer = window.setTimeout(flush, 250);
 }
@@ -76,12 +76,85 @@ function describe(el: Element): Evt {
   return d;
 }
 
+// --- page snapshots ----------------------------------------------------------
+// What the operator saw, kept beside what the page fetched. For a page that
+// renders its results server-side the snapshot is the only record of the
+// outcome. Visible text plus a pruned copy of the DOM (no scripts, styles,
+// handlers or media; ids, classes, links and data attributes kept), taken
+// when a page settles, after an action changed it, and when recording stops.
+const TEXT_CAP = 120_000;
+const HTML_CAP = 400_000;
+const KEEP_ATTR = /^(id|class|href|src|alt|title|name|type|value|placeholder|role|aria-label|for|colspan|rowspan|datetime|data-[\w-]+)$/;
+const DROP = 'script,style,noscript,svg,iframe,template,canvas,video,audio,link,meta,object,embed,[data-wfr]';
+
+function prunedHtml(): { html: string; truncated: boolean } {
+  const clone = document.body.cloneNode(true) as HTMLElement;
+  for (const el of Array.from(clone.querySelectorAll(DROP))) el.remove();
+  const walker = document.createTreeWalker(clone, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  const blank: Node[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.nodeType === Node.TEXT_NODE) {
+      const t = (n.textContent ?? '').replace(/\s+/g, ' ');
+      if (!t.trim()) blank.push(n); else n.textContent = t;
+      continue;
+    }
+    const el = n as Element;
+    for (const a of Array.from(el.attributes)) {
+      if (!KEEP_ATTR.test(a.name)) el.removeAttribute(a.name);
+      else if (a.value.length > 300) el.setAttribute(a.name, a.value.slice(0, 300));
+    }
+    // A hidden or password field's value is a token or a secret, never data.
+    if (el instanceof HTMLInputElement && (el.type === 'hidden' || el.type === 'password')) el.removeAttribute('value');
+  }
+  for (const b of blank) b.parentNode?.removeChild(b);
+  const html = clone.innerHTML;
+  return html.length > HTML_CAP ? { html: html.slice(0, HTML_CAP), truncated: true } : { html, truncated: false };
+}
+
+let lastSnapshot = '';
+let snapshotTimers: number[] = [];
+
+function takeSnapshot(reason: string) {
+  if (!on || !document.body) return;
+  try {
+    snapshot(reason);
+  } catch (e) {
+    // A page the pruner cannot walk must say so in the console, not vanish.
+    console.error('[wfr] snapshot failed:', (e as Error).message);
+  }
+}
+
+function snapshot(reason: string) {
+  const text = (document.body.innerText ?? '').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
+  // The same page text twice is the same page: one snapshot per state.
+  const key = `${location.href}|${text.length}|${text.slice(0, 2000)}|${text.slice(-2000)}`;
+  if (key === lastSnapshot) return;
+  lastSnapshot = key;
+  const { html, truncated } = prunedHtml();
+  push({
+    kind: 'snapshot', reason, url: location.href, title: document.title,
+    text: scrub(text.slice(0, TEXT_CAP)), html: scrub(html),
+    ...(text.length > TEXT_CAP ? { textTruncated: text.length } : {}),
+    ...(truncated ? { htmlTruncated: true } : {}),
+  });
+}
+
+// After an action the page may update at once or a few seconds later; look
+// twice and keep whichever states differ. The clone runs in idle time so it
+// never lands in the middle of the operator's next gesture.
+function snapshotSoon(reason: string) {
+  for (const t of snapshotTimers) clearTimeout(t);
+  const idle = (f: () => void) => (window.requestIdleCallback ? window.requestIdleCallback(f, { timeout: 1500 }) : window.setTimeout(f, 0));
+  snapshotTimers = [1500, 4500].map((ms) => window.setTimeout(() => idle(() => takeSnapshot(reason)), ms));
+}
+
 const INTERACTIVE = 'a,button,input,select,textarea,label,[role="button"],[role="link"],[role="tab"],[onclick]';
 
 document.addEventListener('click', (e) => {
   if ((e.target as Element)?.closest?.('[data-wfr]')) return;
   const el = (e.target as Element)?.closest?.(INTERACTIVE) ?? (e.target as Element);
   if (el instanceof Element) push({ kind: 'action', action: 'click', target: describe(el) });
+  snapshotSoon('change');
 }, { capture: true, passive: true });
 
 // Marking: highlighting text while recording offers a chip; clicking it records
@@ -156,12 +229,14 @@ document.addEventListener('input', (e) => {
 document.addEventListener('submit', (e) => {
   const form = e.target as Element;
   if (form instanceof Element) push({ kind: 'action', action: 'submit', target: describe(form) });
+  snapshotSoon('change');
 }, { capture: true, passive: true });
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   const el = e.target as Element;
   push({ kind: 'action', action: 'enter', target: el instanceof Element ? describe(el) : undefined });
+  snapshotSoon('change');
 }, { capture: true, passive: true });
 
 window.addEventListener('message', (e: MessageEvent) => {
@@ -188,10 +263,13 @@ function pageEvent() {
     kind: 'page', url: location.href, title: document.title,
     lang: document.documentElement.lang || navigator.language,
   });
+  snapshotSoon('load');
 }
 
 function setState(next: { on: boolean; hosts: string[] }) {
   const was = on;
+  // The final state of the page is the recording's last word on the outcome.
+  if (was && !next.on) takeSnapshot('stop');
   on = next.on;
   hosts = next.hosts ?? [];
   window.postMessage({ __wfr: 'state', on, hosts }, '*');
@@ -209,7 +287,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'set-state') setState(msg);
 });
 
-window.addEventListener('pagehide', flush);
+window.addEventListener('pagehide', () => { takeSnapshot('leave'); flush(); });
 
 chrome.runtime.sendMessage({ type: 'get-state' })
   .then((state) => { if (state?.on) setState(state); })

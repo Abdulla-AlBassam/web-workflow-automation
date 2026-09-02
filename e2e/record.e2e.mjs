@@ -92,15 +92,30 @@ try {
     await page.mouse.up();
     await page.waitForTimeout(300); // each mouseup re-renders the chip; let it settle
   };
+  // The chip is re-created on every mouseup, which defeats Playwright's
+  // stability check for a plain click; hand it the mousedown its handler
+  // listens for and confirm the mark took, re-selecting if the chip went.
+  const markChip = async (selector) => {
+    for (let i = 0; i < 8; i++) {
+      try {
+        const chip = page.locator('[data-wfr="chip"]');
+        await chip.waitFor({ timeout: 2000 });
+        await chip.dispatchEvent('mousedown');
+        if ((await chip.textContent()) === 'Marked ✓') { await page.waitForTimeout(800); return; }
+      } catch {}
+      await dragSelect(selector);
+    }
+    throw new Error(`mark chip never accepted the click for ${selector}`);
+  };
   await dragSelect('#results tbody tr td:nth-child(2)');
-  await page.click('[data-wfr="chip"]');
+  await markChip('#results tbody tr td:nth-child(2)');
 
   // Follow the result into its detail view and mark the bio: the recording now
   // carries a chained workflow (search → detail).
   await page.click('#results tbody a');
   await page.waitForSelector('#bio:not([hidden])');
   await dragSelect('#bio_text');
-  await page.click('[data-wfr="chip"]');
+  await markChip('#bio_text');
   await page.waitForTimeout(600); // let the recorder's 250ms batch flush drain
 
   const stopped = await sw.evaluate(() => globalThis.wfr.stop());
@@ -132,6 +147,19 @@ try {
   check('API method and status', net?.method === 'POST' && net?.status === 200, JSON.stringify({ m: net?.method, s: net?.status }));
   check('request body holds the typed CR', !!net?.reqBody?.includes(CR), net?.reqBody);
   check('response body holds the result', !!net?.resBody?.includes('Awal Trading'), net?.resBody?.slice(0, 120));
+
+  // Page snapshots: what the operator saw, taken when a page settles and
+  // when the recording stops, pruned of scripts and styles.
+  const snaps = events.filter((e) => e.kind === 'snapshot');
+  check('page snapshots captured with the results the operator saw',
+    snaps.some((e) => e.text?.includes('Awal Trading Co. W.L.L') && e.html?.includes('id="results"')), JSON.stringify(snaps.map((e) => [e.reason, e.url, e.text?.length])));
+  // The last snapshot is the final state of the page (the bio panel open),
+  // whether it was taken after the last click or forced at stop: an
+  // identical state is never recorded twice.
+  const last = snaps.at(-1);
+  check('the last snapshot is the final page state, before the stop marker',
+    !!last && last.seq < events.at(-1).seq && /Awal Trading opened its first Manama/.test(last.text ?? ''), JSON.stringify(snaps.map((e) => [e.reason, e.seq, e.text?.length])));
+  check('snapshots carry no scripts or styles', snaps.every((e) => !/<script|<style/i.test(e.html ?? '')));
 
   check('password never leaves the page', !raw.includes(PIN));
   check('password field recorded as [REDACTED]', events.some(

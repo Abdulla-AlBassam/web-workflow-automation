@@ -45,7 +45,7 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
       ]
     },
     {
-      "id": "automation",               // a session script, written by the LLM repair assistant
+      "id": "automation",               // a session script, written by a model loop (Adjust or Maximum Effort Mode)
       "type": "script",                 // runner/src/script.ts executes it in an isolated context
       "file": "automation.mjs",         // in the session folder; defines async function run(ctx) → rows
       "reason": "the results are rendered server-side; the script drives the page and reads the list",
@@ -89,7 +89,7 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
 - **Chains are correlated too.** A `link` step exists because a value from the previous step's response appeared in the later request's URL, with positive evidence (a marked value in the later response, or a recorded click leading to it). The runner re-resolves the link from the fresh response on every run.
 - **Columns come from marks.** The operator's highlighted text is located in the outcome response at generate time; the spec stores paths, so a new input yields the same fields for its own data. Matching compares letters and digits only (reference markers, pronunciation glyphs and punctuation are ignored), accepts any shared 80-character stretch of a long selection, prefers an exact field over a containing one, and a field inside the record set over one elsewhere.
 - **Record sets may be keyed.** `extract.records` resolves to an array, or to a map of records keyed by id (MediaWiki `pages`), or to one bare record; a path the response lacks yields zero rows, never the whole response as one row.
-- **Repaired specs carry provenance.** A spec built by the LLM repair assistant has `repaired: { at, model, diagnosis, mode, feedback? }`; `mode` is `repair` (the analyser had refused) or `refine` (a run was flagged, `feedback` holding the operator's note). Its columns were located in the live response the proposal produced. Repaired specs are never regenerated.
+- **Model-built specs carry provenance.** A spec written by a model loop has `repaired: { at, model, diagnosis, mode, feedback?, summary? }`; `mode` is `repair` (the analyser had refused), `refine` (a run was flagged, `feedback` holding the operator's note) or `effort` (Maximum Effort Mode, `feedback` holding the operator's goal and `summary` the model's account of what the automation returns and which recorded choices are baked in). Such specs are never regenerated.
 - **The outcome is validated, never assumed.** `outcome.expect` is a deterministic check on the final response. The runner stops with a named reason when it fails.
 - **Language is explicit.** The recorded UI language is pinned into the spec so a replay does not inherit the runner's default.
 - Templating is `{{name}}` substitution over the JSON body and URL, matched by value at generate time so it survives nested fields.

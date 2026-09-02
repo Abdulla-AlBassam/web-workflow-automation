@@ -4,6 +4,8 @@ import { join } from 'node:path';
 export type Meta = {
   session: string;
   name?: string;
+  // What the operator asked Maximum Effort Mode for, kept with the session.
+  goal?: string;
   hosts: string[];
   startedAt: number;
   stoppedAt?: number;
@@ -73,6 +75,20 @@ export function readEvents(session: string): Record<string, unknown>[] {
     .split('\n')
     .filter(Boolean)
     .map((l) => JSON.parse(l));
+}
+
+// Maximum Effort Mode's conversation with the operator, one line per entry,
+// so the session page can show it again after a reload.
+export const EFFORT_LOG = 'effort.jsonl';
+
+export function appendLog(session: string, entry: object) {
+  appendFileSync(join(dir(session), EFFORT_LOG), JSON.stringify(entry) + '\n');
+}
+
+export function readLog(session: string): Record<string, unknown>[] {
+  const p = join(dir(session), EFFORT_LOG);
+  if (!existsSync(p)) return [];
+  return readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 
 export function listSessions(): Meta[] {

@@ -6,6 +6,7 @@
 //
 //   http.fetch(url, { method, headers, body })  → { status, ok, contentType, text, json() }
 //   browser.open(url)                          → a page handle (fill/click/press/wait/text/texts/html/attr/eval/url)
+//   dom(html)                                  → the same handle over HTML the script already holds, no network
 //   site.token(pageUrl)                        → the anonymous bearer the site mints for every visitor
 //
 // The token is the one credential a script may send: read from the site's
@@ -169,15 +170,29 @@ function makeBrowser(guard: HostGuard, signal: AbortSignal) {
     async close() { await page.close().catch(() => {}); },
   });
 
+  const newPage = async () => {
+    if (signal.aborted) throw new Error('aborted');
+    browser ??= await chromium.launch({ headless: true });
+    context ??= await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 800 } });
+    const page = await context.newPage();
+    pages.push(page);
+    return page;
+  };
+
   return {
     async open(url: string): Promise<PageHandle> {
-      if (signal.aborted) throw new Error('aborted');
       guard.check(url);
-      browser ??= await chromium.launch({ headless: true });
-      context ??= await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 800 } });
-      const page = await context.newPage();
-      pages.push(page);
+      const page = await newPage();
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      return handle(page);
+    },
+    // Server-rendered HTML fetched over http, parsed by a real DOM so the
+    // script can query it with selectors. Every subresource is refused: the
+    // page is the string, nothing else.
+    async fromHtml(html: string): Promise<PageHandle> {
+      const page = await newPage();
+      await page.route('**/*', (r) => r.abort());
+      await page.setContent(String(html).slice(0, 8 * 1024 * 1024), { waitUntil: 'domcontentloaded' });
       return handle(page);
     },
     async dispose() {
@@ -235,6 +250,7 @@ export async function runScript(source: string, options: ScriptOptions): Promise
       inputs: { ...options.inputs },
       http: makeHttp(guard, abort.signal, issued),
       browser: { open: browser.open },
+      dom: browser.fromHtml,
       site: {
         async token(pageUrl: string) {
           guard.check(pageUrl);
@@ -270,7 +286,7 @@ export async function runScript(source: string, options: ScriptOptions): Promise
 
 // The string literals of a script: the only place a hard-coded value can
 // hide. Property names, identifiers and comments are not data.
-function stringLiterals(source: string): string[] {
+export function stringLiterals(source: string): string[] {
   return [...source.matchAll(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g)].map((m) => m[0].slice(1, -1));
 }
 

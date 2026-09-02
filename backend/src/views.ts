@@ -83,11 +83,29 @@ details.spec-json { margin-top:12px; } details.spec-json summary { font-size:12p
 .rc-ok, .rc-saved { color:#6BD49A; }
 .rc-advice { color:#F2CE72; }
 .fix-block { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); }
+.chat { margin-top:12px; display:flex; flex-direction:column; gap:8px; max-height:600px; overflow:auto; padding:12px; background:var(--bg); border-radius:8px; }
+.msg { max-width:92%; padding:8px 12px; border-radius:10px; white-space:pre-wrap; word-break:break-word; font-size:13px; line-height:1.5; text-wrap:pretty; }
+.msg-say { background:var(--surface); box-shadow:0 0 0 1px rgb(20 24 32/.06); align-self:flex-start; }
+.msg-you { background:#EAF0FE; color:#1E3A8A; align-self:flex-end; }
+details.msg-think { color:var(--muted); font-size:12px; align-self:flex-start; padding:4px 12px; }
+details.msg-think summary { cursor:pointer; font-weight:600; font-size:11px; letter-spacing:.02em; text-transform:uppercase; }
+details.msg-think div { white-space:pre-wrap; word-break:break-word; margin-top:4px; font-style:italic; }
+.msg-status { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--muted); align-self:stretch; max-width:100%; padding:2px 4px; }
+.msg-status.rc-ok, .msg-status.rc-saved { color:var(--ok); }
+.msg-status.rc-fail, .msg-status.rc-error { color:var(--rec); }
+.msg-status.rc-advice { color:var(--warn); }
+.msg-status.rc-await { color:var(--accent); font-weight:600; }
+.msg-sep { font-size:11px; color:var(--muted); align-self:center; padding:4px 0; }
+.say-row { display:flex; gap:8px; align-items:flex-end; margin-top:10px; }
+.say-row textarea { flex:1; }
 `;
 
 function esc(s: unknown): string {
   return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 }
+
+// JSON inside a <script>: a literal "</script>" in a value would end it.
+const jsonForScript = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
 
 const STATUS_GLYPH: Record<string, string> = { complete: '✓', interrupted: '✗', recording: '●' };
 function statusBadge(st: string): string {
@@ -137,7 +155,7 @@ function timelineRow(e: Record<string, unknown>): string {
   return `<li><span>${tag}</span><span class="body">${body}</span></li>`;
 }
 
-export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record<string, unknown>[], spec: any | undefined, script?: string): string {
+export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record<string, unknown>[], spec: any | undefined, script?: string, log: Record<string, unknown>[] = []): string {
   // The operator's story, not the raw stream: keep actions, navigation, the
   // outcome calls (search, and the chained detail when present) and lifecycle
   // markers; drop the dropdown-population noise.
@@ -165,14 +183,9 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
 
   const specCard = spec ? renderSpec(spec, meta.session, a.marks.length, script) : `<div class="card"><h2>Automation</h2>
     <p class="note">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p>
-    ${st === 'complete' ? `
-    <div class="runrow" style="margin-top:12px">
-      <button id="repair-btn" class="btn">Begin LLM repair</button>
-      <span class="sub">An LLM investigates the recording (full captured bodies, probes of the site, pages in a browser) and writes a script for this session. The script is executed with your recorded input and must return what you marked before it is saved.</span>
-    </div>
-    <div id="repair-console" class="repair-console" hidden></div>
-    <div id="repair-after"></div>` : ''}
+    ${st === 'complete' ? `<p class="sub" style="margin-top:10px">The deterministic analyser found no direct call to promote. <a href="#effort">Maximum Effort Mode</a> below reads the pages you saw and works out how to reach the result.</p>` : ''}
   </div>`;
+  const effortCard = st === 'complete' ? renderEffort(meta, log) : '';
 
   return shell(`Session ${meta.name ?? meta.session}`, `
     <script>
@@ -273,6 +286,8 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
 
     ${specCard}
 
+    ${effortCard}
+
     <script>
     (() => {
       const btn = document.getElementById('rename-btn');
@@ -328,7 +343,9 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string)
 
   return `<div class="card">
     <h2>Generated automation <span class="sub">— best way to reach the outcome</span></h2>
-    ${spec.repaired?.mode === 'refine'
+    ${spec.repaired?.mode === 'effort'
+      ? `<p class="ok-note" style="margin:0 0 12px">Built in Maximum Effort Mode (${esc(spec.repaired.model)})${spec.repaired.feedback ? ` for: “${esc(spec.repaired.feedback)}”` : ''}. ${esc(spec.repaired.summary ?? spec.repaired.diagnosis)} Verified by running it with the recorded input against the pages and calls in the recording before saving.</p>`
+      : spec.repaired?.mode === 'refine'
       ? `<p class="ok-note" style="margin:0 0 12px">Refined by the LLM repair assistant (${esc(spec.repaired.model)}) after a run was flagged${spec.repaired.feedback ? ` ("${esc(spec.repaired.feedback)}")` : ''}: ${esc(spec.repaired.diagnosis)} Verified by executing it with the recorded input against the recording's own evidence before saving.</p>`
       : spec.repaired
         ? `<p class="ok-note" style="margin:0 0 12px">Built by the LLM repair assistant (${esc(spec.repaired.model)}) after the deterministic analyser refused: ${esc(spec.repaired.diagnosis)} Verified by executing it with the recorded input against the recording's own evidence before saving.</p>`
@@ -360,9 +377,9 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string)
     <div class="runrow">${inputs}<button id="run-btn" class="btn">Run</button></div>
     <div id="run-out"></div>
     <div id="fix-block" class="fix-block" hidden>
-      <p class="sub" style="margin-bottom:8px">Not what you wanted? Describe the problem, or leave this blank: the assistant compares what you marked while recording with what this run returned.</p>
+      <p class="sub" style="margin-bottom:8px">Not what you wanted? For a small adjustment (fewer fields, a missing column) describe it here; the assistant changes the automation and verifies it against your recording. For anything bigger, use <a href="#effort">Maximum Effort Mode</a> below.</p>
       <textarea id="fix-text" rows="2" placeholder="e.g. I only want the article text, not the other fields"></textarea>
-      <div class="runrow" style="margin-top:8px"><button id="fix-btn" class="btn">Fix with LLM</button><span class="sub">The assistant investigates and writes a script for this session; it is executed and verified against your recording before anything is saved.</span></div>
+      <div class="runrow" style="margin-top:8px"><button id="fix-btn" class="btn">Adjust</button><span class="sub">Nothing is saved until the adjusted automation has been run against your recording.</span></div>
       <div id="fix-console" class="repair-console" hidden></div>
       <div id="fix-after"></div>
     </div>
@@ -556,6 +573,178 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string)
         bulkOut.append(exportButtons(aggregated, 'bulk-export'));
       }
       bulkBtn.disabled = false;
+    });
+  })();
+  </script>`;
+}
+
+// Maximum Effort Mode: the operator states the goal, the model works in the
+// open (thinking, prose, tools, verdicts) and the two talk until the
+// automation is saved. The page renders the conversation live from the
+// NDJSON stream, and again from the session's log after a reload.
+function renderEffort(meta: Meta, log: Record<string, unknown>[]): string {
+  return `<div class="card" id="effort">
+    <h2>Maximum Effort Mode <span class="sub">— hand the whole recording to the model</span></h2>
+    <p class="sub" style="margin-bottom:10px">It reads every page you looked at, every call the site made and the route you took, then works out how to reach the result you want for any input. It talks to you here as it works, shows its reasoning, asks when something is unclear, and nothing is saved until the automation has been run against your recording and returned what you saw. You can stop it at any point.</p>
+    <textarea id="effort-goal" rows="3" placeholder="What should this automation return? e.g. the top 5 listings on the final page, with the title, price and a link to each">${esc(meta.goal ?? '')}</textarea>
+    <div class="runrow" style="margin-top:8px">
+      <button id="effort-btn" class="btn">${log.length ? 'Start again' : 'Start'}</button>
+      <button id="effort-stop" class="btn btn-quiet" hidden>Stop</button>
+      <span id="effort-status" class="sub"></span>
+    </div>
+    <div id="effort-chat" class="chat" ${log.length ? '' : 'hidden'}></div>
+    <div id="effort-say-row" class="say-row" hidden>
+      <textarea id="effort-say" rows="2" placeholder="Reply to the model… (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button id="effort-send" class="btn">Send</button>
+    </div>
+    <div id="effort-after"></div>
+  </div>
+
+  <script>
+  (() => {
+    const id = ${JSON.stringify(meta.session)};
+    const past = ${jsonForScript(log)};
+    const chat = document.getElementById('effort-chat');
+    const btn = document.getElementById('effort-btn');
+    const stopBtn = document.getElementById('effort-stop');
+    const status = document.getElementById('effort-status');
+    const sayRow = document.getElementById('effort-say-row');
+    const sayBox = document.getElementById('effort-say');
+    const sendBtn = document.getElementById('effort-send');
+    const after = document.getElementById('effort-after');
+    const GLYPH = { info: '· ', tool: '⚙ ', try: '→ ', fail: '✗ ', ok: '✓ ', saved: '✓ ', advice: '☞ ', error: '✗ ', done: '· ', await: '… ' };
+
+    // One bubble per streamed block: thinking folds away once prose starts.
+    let cur;
+    function bubble(kind, text) {
+      if (kind === 'think') {
+        const det = document.createElement('details');
+        det.className = 'msg msg-think';
+        det.open = true;
+        const sum = document.createElement('summary');
+        sum.textContent = 'Thinking';
+        const body = document.createElement('div');
+        body.textContent = text;
+        det.append(sum, body);
+        chat.append(det);
+        return { kind, el: body, det };
+      }
+      const d = document.createElement('div');
+      d.className = 'msg msg-' + kind;
+      d.textContent = text;
+      chat.append(d);
+      return { kind, el: d };
+    }
+    function settle() {
+      if (cur && cur.det) cur.det.open = false;
+      cur = undefined;
+    }
+    let viewShown = false;
+    function line(e) {
+      if (e.kind === 'block') { settle(); cur = bubble(e.text === 'think' ? 'think' : 'say', ''); }
+      else if (e.delta) {
+        if (!cur || cur.kind !== e.kind) { settle(); cur = bubble(e.kind, ''); }
+        cur.el.textContent += e.text;
+      } else if (e.kind === 'say' || e.kind === 'think' || e.kind === 'you') {
+        settle();
+        const b = bubble(e.kind, e.text);
+        if (b.det) b.det.open = false;
+      } else if (e.kind === 'start') {
+        settle();
+        const d = document.createElement('div');
+        d.className = 'msg-sep';
+        d.textContent = 'conversation started ' + new Date(e.text).toLocaleString('en-GB');
+        chat.append(d);
+      } else if (e.kind === 'llm') {
+        return;
+      } else {
+        settle();
+        const d = document.createElement('div');
+        d.className = 'msg msg-status rc-' + e.kind;
+        d.textContent = (GLYPH[e.kind] ?? '') + e.text;
+        chat.append(d);
+        if (e.kind === 'await') sayBox.focus();
+        if (e.kind === 'saved' && !viewShown) {
+          viewShown = true;
+          const view = document.createElement('button');
+          view.className = 'btn';
+          view.style.marginTop = '10px';
+          view.textContent = 'View & run the automation';
+          view.addEventListener('click', () => location.reload());
+          after.append(view);
+        }
+      }
+      chat.scrollTop = chat.scrollHeight;
+    }
+    for (const e of past) line(e);
+    settle();
+    if (past.length) chat.scrollTop = chat.scrollHeight;
+
+    let running = false;
+    async function start() {
+      running = true;
+      btn.disabled = true;
+      stopBtn.hidden = false;
+      stopBtn.disabled = false;
+      stopBtn.textContent = 'Stop';
+      sayRow.hidden = false;
+      sendBtn.disabled = false;
+      chat.hidden = false;
+      status.textContent = 'Working…';
+      try {
+        const r = await fetch('/api/sessions/' + encodeURIComponent(id) + '/effort', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ goal: document.getElementById('effort-goal').value.trim() }),
+        });
+        if (!r.ok) { line({ kind: 'error', text: (await r.json().catch(() => ({}))).error || ('backend ' + r.status) }); }
+        else {
+          const reader = r.body.getReader();
+          const dec = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let i;
+            while ((i = buf.indexOf('\\n')) >= 0) {
+              const l = buf.slice(0, i).trim();
+              buf = buf.slice(i + 1);
+              if (l) line(JSON.parse(l));
+            }
+          }
+        }
+      } catch (e) {
+        line({ kind: 'error', text: 'stream lost: ' + e.message });
+      }
+      settle();
+      running = false;
+      status.textContent = 'Ended.';
+      stopBtn.hidden = true;
+      sendBtn.disabled = true;
+      btn.disabled = false;
+      btn.textContent = 'Start again';
+    }
+    btn.addEventListener('click', start);
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Stopping…';
+      await fetch('/api/sessions/' + encodeURIComponent(id) + '/effort/stop', { method: 'POST' }).catch(() => {});
+    });
+    async function send() {
+      const text = sayBox.value.trim();
+      if (!text || !running) return;
+      sayBox.value = '';
+      const r = await fetch('/api/sessions/' + encodeURIComponent(id) + '/effort/say', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }).catch(() => undefined);
+      if (!r || !r.ok) line({ kind: 'error', text: 'could not deliver your message' + (r ? ' (' + r.status + ')' : '') });
+    }
+    sendBtn.addEventListener('click', send);
+    sayBox.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
   })();
   </script>`;

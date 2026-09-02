@@ -14,7 +14,8 @@
     "test:enhancements": "node e2e/enhancements.mjs",
     "typecheck": "tsc -p extension/tsconfig.json && tsc -p backend/tsconfig.json && tsc -p runner/tsconfig.json",
     "test:matrix": "node e2e/matrix.e2e.mjs",
-    "test:repair": "node e2e/repair.e2e.mjs"
+    "test:repair": "node e2e/repair.e2e.mjs",
+    "test:effort": "node e2e/effort.e2e.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",

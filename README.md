@@ -24,8 +24,13 @@ Record, analyse, generate, execute.
 Record (`extension/`, `backend/`). An MV3 Chrome extension captures typed
 values, clicks, navigations, text the operator highlights, and every
 fetch/XHR request the page makes with its request and response bodies and
-the request headers the page's own code set, whatever host it goes to.
-Bodies are kept up to 2 MB; a longer one is cut and the cut is declared.
+the request headers the page's own code set, whatever host it goes to. It
+also keeps snapshots of the pages the operator looked at: the visible text
+and a pruned copy of the DOM (no scripts, styles, handlers or media), taken
+when a page settles, after an action changed it, and when recording stops.
+For a site that renders its results into the page, the snapshot is the only
+record of the outcome. Bodies are kept up to 2 MB, snapshots up to 600 KB
+of HTML; a longer one is cut and the cut is declared.
 Cookies, `Authorization` headers and password values are stripped in the
 extension and again in the backend. Events stream to a local Fastify
 backend as they happen.
@@ -111,9 +116,10 @@ on the real site.
 
 Two layers. The deterministic pipeline needs the typed value to appear
 unchanged in a request and the outcome to come back as structured data.
-When it refuses, the LLM assistant can investigate and write a script for
-the session. Each line below says which layer it lands on and how the
-recovery was checked.
+When it refuses, or when the workflow is more than one search (filters,
+sorts, several pages), Maximum Effort Mode hands the whole recording to a
+model that works it out and writes a script for the session. Each line
+below says which layer it lands on and how the recovery was checked.
 
 The pipeline refuses; the assistant can recover:
 
@@ -152,59 +158,72 @@ books or submits could only be checked by submitting again, so such
 workflows are not attempted. The assistant could write them; it could not
 prove them, and nothing unproven is saved.
 
-## The LLM repair assistant
+## Maximum Effort Mode
 
-When the deterministic analysis refuses, or a saved automation returns the
-wrong thing, the session page offers a button. Nothing runs without it. A
-console shows what the model checks, each tool it uses, each script it
-submits and the verdict.
+The deterministic pipeline is the fast lane: one search, one call, done.
+Everything else goes through Maximum Effort Mode, on the session page.
+The operator says in a sentence what the automation should return ("the
+top 5 listings on the final page, with title, price and a link to each")
+and presses Start. Nothing runs without that press.
 
-The model gets the whole recording, every body readable in full, plus the
-analyser's verdict, and five tools: read a captured body page by page;
-probe an endpoint and see the whole response (an API on another host, the
-JSON form of a JSONP call, a public API it knows, a body the recorder cut);
-open a page in a headless browser, fill, click, and read text, HTML or the
-result of an expression evaluated in the page; write a script; and, when
-refining a deterministic automation, set columns, which keeps the automation
-as it is and changes only the fields returned.
+The model gets the whole recording: every page the operator looked at, as
+text and pruned DOM; the route they took, with the query parameters that
+changed at each step (a sort, a filter, a price bound shows up here by
+name); every call the site made, bodies readable in full; every value
+typed, labelled the way the page labels it; everything marked; and the
+deterministic analyser's verdict, flagged as a guess. It reasons in the
+open. Its thinking and its prose stream to the page as they are produced,
+it says what it is checking and what it found, and when the goal is
+ambiguous it asks and waits. The operator can answer, add detail or change
+their mind at any point, mid-task or after a save; Stop ends it at once.
 
-The script is plain JavaScript, `async function run(ctx)`, taking the run's
-parameters and returning rows. It runs in an isolated context with three
-capabilities: HTTP requests, a browser page, and the anonymous bearer a site
-issues to every visitor, read from the site's web storage. That bearer is
-the only credential it can send; any other authorisation header is dropped.
-No files, no environment, no modules. It is saved as `automation.mjs` in the
-session folder, shown in full on the session page, and runs for every later
-run of that session.
+Tools: read a page snapshot (text or HTML); read a captured body page by
+page; probe an endpoint and see the whole response, with the site's
+anonymous bearer when one gates the API; open a page in a headless browser,
+fill, click, and read text, HTML or the result of an expression evaluated
+in the page; write the script; give up with advice on what to record
+differently.
 
-Acceptance is deterministic. The script must read every parameter from
-`ctx.inputs`, carry none of the recorded values as a literal, and import
-nothing. It is executed with the recorded inputs and must return rows within
-90 seconds. If text was marked, each mark must appear as a field value in
-some row; a partial match is fed back with the missing marks named, and the
-best verified attempt is kept if nothing better arrives. If nothing was
-marked, some row must carry the typed value or the text of a result the
-operator clicked. The hosts the script contacted are saved and every later
-run is confined to them. A recording with nothing typed and nothing marked
-is refused before any model call.
+The script is plain JavaScript, `async function run(ctx)`, taking the
+parameters the model declares (named as a person would: `query`,
+`min_price`) and returning rows. It runs in an isolated context with four
+capabilities: HTTP requests, a DOM over HTML it already fetched (so a
+server-rendered listing is parsed with selectors, no browser), a live
+browser page, and the anonymous bearer a site issues to every visitor. That
+bearer is the only credential it can send. No files, no environment, no
+modules. It is saved as `automation.mjs` in the session folder, shown in
+full on the session page, and runs for every later run of that session.
 
-Refine works the same way. After a run, Fix with LLM takes an optional note;
-the assistant sees the current automation, the last run and the note, and a
-verified replacement overwrites the old one with its provenance shown on the
-page.
+Acceptance is deterministic and the model cannot skip it. The script must
+read every declared parameter from `ctx.inputs`, carry no typed value as a
+literal unless it declares that value fixed and says why, and import
+nothing. It is executed with the recorded values and must return rows
+within 120 seconds. If text was marked, every mark must appear as a field
+value in some row. Otherwise at least one row must carry text that appears
+in a page snapshot the operator saw, or the typed value, or a result they
+clicked. A script whose rows the operator never saw is rejected with that
+reason. The hosts the accepted script contacted are saved and every later
+run is confined to them. The conversation is kept in the session folder
+and shown again after a reload.
 
-Rails: 16 model turns, 20 tool calls, 6 script attempts, a token ceiling,
-and a repeated identical call refused from its third occurrence. A Stop
-button ends the loop at once; a partly verified attempt is kept, nothing
-else is saved. The console reports the estimated spend. Default model `claude-sonnet-5`; `REPAIR_MODEL`
-overrides it. Put `ANTHROPIC_API_KEY=...` in a `.env` file at the project
-root and restart the backend. This is the only part of the tool that sends
+The older assistant is still there for one job: after a run of a
+deterministic automation, Adjust takes a note ("only the name and the
+city") and narrows the fields or rewrites the script, verified the same
+way. For anything bigger the page points at Maximum Effort Mode.
+
+Rails: 60 model turns, 120 tool calls, 12 script attempts, a token
+ceiling, an identical call refused from its third occurrence, fifteen
+minutes of waiting for a reply. The page reports the estimated spend.
+Default model `claude-opus-5` at effort `xhigh` with adaptive thinking;
+`EFFORT_MODEL` and `EFFORT_LEVEL` override them (`REPAIR_MODEL` for
+Adjust). Put `ANTHROPIC_API_KEY=...` in a `.env` file at the project root
+and restart the backend. This is the only part of the tool that sends
 anything off the machine, and it sends the sanitised recording.
 
-The assistant cannot change the tool, save anything unchecked, log in, pass
-a CAPTCHA, send a cookie, reach beyond its verified hosts, touch the
+The model cannot change the tool, save anything unchecked, log in, pass a
+CAPTCHA, send a cookie, reach beyond its verified hosts, touch the
 filesystem, see traffic the recorder never saw, or run without limit. If a
-site changes, the script fails with a reason and the button is there again.
+site changes, the script fails with a reason and the mode is there again.
 
 ## Safeguards
 
@@ -227,7 +246,7 @@ site changes, the script fails with a reason and the button is there again.
 
 ```
 extension/   MV3 recorder (popup, content script, MAIN-world network tap)
-backend/     Fastify: event store, redaction, analysis, spec generation, UI, repair loop
+backend/     Fastify: event store, redaction, analysis, spec generation, UI, model loops
 runner/      Spec execution: requests, token discovery, page extraction, session scripts
 fixtures/    Mock sites, a banked Sijilat trace and specs
 e2e/         Test suites
@@ -239,6 +258,7 @@ npm run e2e                # record to replay in real Chromium (stop the backend
 npm run test:failures      # every named stop
 npm run test:enhancements  # pagination, bulk, URL specs, chains, marks
 npm run test:matrix        # eight site shapes recorded end to end in real Chromium
-npm run test:repair        # repair loop against a scripted mock model
+npm run test:repair        # adjust loop against a scripted mock model
+npm run test:effort        # Maximum Effort Mode against a scripted mock model and a rendered shop
 npm run typecheck
 ```
