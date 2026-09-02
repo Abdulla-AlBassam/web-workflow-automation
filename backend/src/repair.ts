@@ -595,6 +595,13 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
     emit(kind, text);
     emit('info', `Spend this repair: ${estimateSpend(MODEL, usage)}`);
   };
+  // The operator pressed Stop (or left the page). Nothing unverified is
+  // saved, but a partially verified attempt is kept as it would be at the
+  // budget limit.
+  const stopped = () => {
+    if (partial) { save(partial.source, partial.title, partial.summary, partial.run, `stopped by the operator; kept the best verified attempt (${marks.length - partial.missing.length} of ${marks.length} marked selections)`); finish('done', 'Stopped by the operator; saved the partial automation.'); return; }
+    finish('done', existing ? 'Stopped by the operator; the saved automation is unchanged.' : 'Stopped by the operator.');
+  };
 
   const messages: Anthropic.Beta.BetaMessageParam[] = [{
     role: 'user',
@@ -605,7 +612,7 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
   if (fallbackable) betas.push('server-side-fallback-2026-07-01');
 
   for (let turn = 1; turn <= MAX_TURNS; turn++) {
-    if (signal.aborted) { emit('info', 'stopped by the operator'); return; }
+    if (signal.aborted) { stopped(); return; }
     if (usage.input + usage.cacheRead + usage.cacheWrite > MAX_INPUT_TOKENS) {
       if (partial) { save(partial.source, partial.title, partial.summary, partial.run, `token budget reached; kept the best verified attempt (${marks.length - partial.missing.length} of ${marks.length} marked selections)`); finish('done', 'Budget reached.'); return; }
       finish('done', 'Token budget for this repair reached without a verified automation.');
@@ -622,9 +629,10 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
         messages,
         ...(betas.length ? { betas } : {}),
         ...(fallbackable ? { fallbacks: 'default' as const } : {}),
-      } as Parameters<typeof client.beta.messages.stream>[0]);
+      } as Parameters<typeof client.beta.messages.stream>[0], { signal });
       msg = await stream.finalMessage();
     } catch (e) {
+      if (signal.aborted) { stopped(); return; }
       finish('error', `model call failed: ${(e as Error).message}`);
       return;
     }
@@ -711,6 +719,7 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
       if (use.name === 'read_body') emit('tool', `read_body ${typeof args.probe === 'number' ? `probe #${args.probe}` : `#${args.seq}`}${args.offset ? ` from ${args.offset}` : ''}`);
       const out = await runTool(use.name, args, ctx).catch((e) => `tool failed: ${(e as Error).message}`);
       results.push({ type: 'tool_result', tool_use_id: use.id, content: out });
+      if (signal.aborted) { stopped(); return; }
     }
     messages.push({ role: 'user', content: results });
   }

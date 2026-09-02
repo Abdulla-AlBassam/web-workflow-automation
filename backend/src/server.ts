@@ -169,6 +169,7 @@ app.post('/api/sessions/:id/repair', async (req, reply) => {
   // Refining a saved automation: the page sends what the last run returned
   // and, optionally, the operator's note on what was wrong with it.
   const { feedback, lastRun } = (req.body ?? {}) as { feedback?: string; lastRun?: unknown };
+  if (repairs.has(id)) return reply.code(409).send({ error: 'a repair is already running for this session' });
   reply.hijack();
   const raw = reply.raw;
   raw.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
@@ -177,6 +178,7 @@ app.post('/api/sessions/:id/repair', async (req, reply) => {
   // (The request's close fires as soon as its JSON body is consumed.)
   const abort = new AbortController();
   raw.on('close', () => abort.abort());
+  repairs.set(id, abort);
   try {
     await repairSession(id, emit, abort.signal, {
       feedback: String(feedback ?? '').slice(0, 2000), lastRun,
@@ -185,8 +187,21 @@ app.post('/api/sessions/:id/repair', async (req, reply) => {
     });
   } catch (e) {
     emit('error', (e as Error).message);
+  } finally {
+    repairs.delete(id);
   }
   raw.end();
+});
+
+// One repair per session at a time; the Stop button aborts it. The loop
+// finishes on its own stream (spend line, best partial kept), so the page
+// keeps reading rather than tearing the connection down.
+const repairs = new Map<string, AbortController>();
+app.post('/api/sessions/:id/repair/stop', async (req) => {
+  const { id } = req.params as { id: string };
+  const running = repairs.get(id);
+  running?.abort();
+  return { stopped: running !== undefined };
 });
 
 // Tokens are cached per origin so bulk runs pay the browser-launch cost once,

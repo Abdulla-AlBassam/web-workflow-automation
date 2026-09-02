@@ -164,6 +164,9 @@ const scripts = [
   [tool('write_script', { source: GATED_FORGED, title: 'Gated Search', summary: 'Calls the API.' })],
   [tool('write_script', { source: GATED_SCRIPT, title: 'Gated Search', summary: 'Calls the API with the anonymous bearer the site mints.' })],
 ];
+// --- stopme: a reply that never arrives; the operator presses Stop.
+const SLOW = 'slow';
+scripts.push(SLOW);
 // After the script runs out the model probes forever, two at a time: the
 // loop's own budget must end it.
 const FOREVER = () => [tool('probe', { method: 'GET', url: `${SUGGEST}?q=x` }), tool('probe', { method: 'GET', url: `${SUGGEST}?q=y` })];
@@ -193,7 +196,15 @@ const llm = createServer((req, res) => {
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     llmRequests.push(JSON.parse(body));
-    sse(res, scripts.shift() ?? FOREVER());
+    const next = scripts.shift() ?? FOREVER();
+    if (next === SLOW) {
+      // Headers only, then silence: a model call still in flight when the
+      // operator stops. The abort must cut it, not wait for it.
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      setTimeout(() => { if (!res.destroyed) res.end(); }, 15_000).unref();
+      return;
+    }
+    sse(res, next);
   });
 });
 llm.listen(LLM_PORT);
@@ -432,6 +443,27 @@ try {
   const gatedScriptRun = await api('/api/sessions/gated/run', { params: { query: 'gulf' } });
   check('gated: the script replays through the token',
     gatedScriptRun.ok && gatedScriptRun.steps[0].type === 'script' && gatedScriptRun.extracted?.records?.rows?.[0]?.name === 'Gulf Gum Trading', gatedScriptRun.stoppedReason ?? JSON.stringify(gatedScriptRun));
+
+  // Scenario 8c: the operator stops a repair while the model call is in
+  // flight. The loop ends on its own stream, with the spend, saving nothing.
+  await record('stopme', jsonpEvents());
+  const idle = await api('/api/sessions/stopme/repair/stop', {});
+  check('stop with nothing running says so', idle.stopped === false, JSON.stringify(idle));
+  const stopping = repair('stopme');
+  await new Promise((r) => setTimeout(r, 600));
+  const second = await fetch(`${BACKEND}/api/sessions/stopme/repair`, { method: 'POST' });
+  check('a second repair of the same session is refused while one runs', second.status === 409, String(second.status));
+  const t0 = Date.now();
+  const stopAck = await api('/api/sessions/stopme/repair/stop', {});
+  const stopLines = await stopping;
+  check('stop aborts the in-flight model call promptly', stopAck.stopped === true && Date.now() - t0 < 3000, `${Date.now() - t0}ms`);
+  check('stopped repair ends with a named line, the spend, and no spec',
+    stopLines.some((l) => l.kind === 'done' && /^Stopped by the operator\.$/.test(l.text)) &&
+    stopLines.some((l) => l.kind === 'info' && /Spend this repair/.test(l.text)) &&
+    !existsSync(join(dataDir, 'stopme', 'spec.json')), JSON.stringify(stopLines.slice(-3)));
+  const stopPage = await fetch(`${BACKEND}/session/stopme`).then((r) => r.text());
+  check('session page carries the Stop control', stopPage.includes("stop.textContent = 'Stop'") && stopPage.includes('/repair/stop'));
+  check('session page scripts parse (stop control)', scriptsCompile(stopPage) === '', scriptsCompile(stopPage));
 
   // Scenario 9: a model that never stops investigating hits the budget.
   await record('loop', jsonpEvents());

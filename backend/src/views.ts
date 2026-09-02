@@ -75,6 +75,7 @@ details.spec-json { margin-top:12px; } details.spec-json summary { font-size:12p
 .rename-input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-color:var(--accent); }
 .repair-console { background:#0F1420; color:#E6EDF3; border-radius:8px; padding:12px 14px; margin-top:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; line-height:1.7; max-height:380px; overflow:auto; }
 .repair-console div { white-space:pre-wrap; word-break:break-word; }
+.rc-stop { margin-top:12px; }
 .rc-info, .rc-done { color:#8A93A6; }
 .rc-llm { color:#9EC1FF; }
 .rc-try { color:#E6EDF3; }
@@ -182,6 +183,17 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
       con.hidden = false;
       con.innerHTML = '';
       after.innerHTML = '';
+      // Stop asks the backend to abort this session's loop; the stream stays
+      // open so the closing lines (what was kept, the spend) still arrive.
+      const stop = document.createElement('button');
+      stop.className = 'btn btn-quiet rc-stop';
+      stop.textContent = 'Stop';
+      stop.addEventListener('click', async () => {
+        stop.disabled = true;
+        stop.textContent = 'Stopping…';
+        await fetch('/api/sessions/' + encodeURIComponent(id) + '/repair/stop', { method: 'POST' }).catch(() => {});
+      });
+      con.before(stop);
       const GLYPH = { info: '· ', llm: '\u2234 ', tool: '\u2699 ', try: '\u2192 ', fail: '\u2717 ', ok: '\u2713 ', saved: '\u2713 ', advice: '\u261e ', error: '\u2717 ', done: '· ' };
       const line = (kind, text) => {
         const d = document.createElement('div');
@@ -217,6 +229,7 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
       } catch (e) {
         line('error', 'stream lost: ' + e.message);
       }
+      stop.remove();
       if (savedOk) {
         const view = document.createElement('button');
         view.className = 'btn';
