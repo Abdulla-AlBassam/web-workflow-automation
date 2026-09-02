@@ -17,7 +17,7 @@ import { analyse } from './analyse.js';
 import { SPEC_VERSION, toSpec } from './generate.js';
 import { probeAuth } from './probe.js';
 import { renderDetail, renderList } from './views.js';
-import { run } from '../../runner/src/run.js';
+import { run, type RunDeps } from '../../runner/src/run.js';
 import { readBearerViaBrowser, type Bearer } from '../../runner/src/browser-token.js';
 import { extractPageViaBrowser } from '../../runner/src/browser-extract.js';
 import { runScript } from '../../runner/src/script.js';
@@ -178,7 +178,11 @@ app.post('/api/sessions/:id/repair', async (req, reply) => {
   const abort = new AbortController();
   raw.on('close', () => abort.abort());
   try {
-    await repairSession(id, emit, abort.signal, { feedback: String(feedback ?? '').slice(0, 2000), lastRun });
+    await repairSession(id, emit, abort.signal, {
+      feedback: String(feedback ?? '').slice(0, 2000), lastRun,
+      readToken: cachedReadToken,
+      runSpec: (spec, params) => run(spec, params, runDeps(id)),
+    });
   } catch (e) {
     emit('error', (e as Error).message);
   }
@@ -196,20 +200,22 @@ async function cachedReadToken(loadUrl: string): Promise<Bearer | undefined> {
   return tok;
 }
 
+const runDeps = (id: string): RunDeps => ({
+  readToken: cachedReadToken,
+  extractPage: extractPageViaBrowser,
+  runScript: async (file, inputs, hosts) => {
+    const source = getScript(id, file);
+    if (source === undefined) return { error: `session script ${file} is missing`, hosts: [], log: [] };
+    return runScript(source, { inputs, hosts, readToken: cachedReadToken });
+  },
+});
+
 app.post('/api/sessions/:id/run', async (req, reply) => {
   const { id } = req.params as { id: string };
   const spec = (await freshSpec(id)) as Parameters<typeof run>[0] | undefined;
   if (!spec) return reply.code(404).send({ error: 'no spec for this session' });
   const { params } = (req.body ?? {}) as { params?: Record<string, string> };
-  return run(spec, params ?? {}, {
-    readToken: cachedReadToken,
-    extractPage: extractPageViaBrowser,
-    runScript: async (file, inputs, hosts) => {
-      const source = getScript(id, file);
-      if (source === undefined) return { error: `session script ${file} is missing`, hosts: [], log: [] };
-      return runScript(source, { inputs, hosts });
-    },
-  });
+  return run(spec, params ?? {}, runDeps(id));
 });
 
 app.get('/', async (_req, reply) => {

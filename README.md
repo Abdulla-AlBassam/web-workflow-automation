@@ -243,8 +243,12 @@ What the assistant can do:
   body the recorder cut.
 - Open a page in a hidden browser, type and click on it, and read what
   appears, including results that only exist as rendered HTML.
+- Use the anonymous bearer a site mints for every visitor (the Sijilat
+  shape), read from the site's own web storage, to call a token-gated API.
 - Write a script for that one session, retry when the check rejects it,
   and refine a saved automation the operator has flagged.
+- Narrow a working automation to the fields the operator wants without
+  rewriting it.
 
 What it cannot do:
 
@@ -253,7 +257,8 @@ What it cannot do:
 - Save anything unchecked. A script is kept only after the tool has run it
   with the recorded input and found the marked text in the rows.
 - Log in, pass a CAPTCHA, or send a cookie. Credentials are never recorded,
-  and a cookie or authorisation header in a script is dropped.
+  and a cookie or authorisation header in a script is dropped. The one
+  exception is the anonymous token the site itself issued to the browser.
 - Reach beyond the hosts it proved. The saved script is confined to the
   hosts it contacted during the check.
 - Touch the machine: no files, no environment, no modules, no other
@@ -279,11 +284,17 @@ body reachable in full) plus the analyser's verdict, and four tools:
   and waits, and returns the page's text, an element's HTML, or the result
   of a JavaScript expression evaluated in the page.
 - **write_script** submits a script for this session.
+- **set_columns**, in refine mode on a deterministic automation, keeps the
+  automation exactly as it is (token step, pagination, everything) and
+  changes only which fields each row returns. Verified by running the saved
+  automation with the recorded input.
 
 The script is a small plain-JavaScript program, `async function run(ctx)`,
 that receives the run's parameters and returns rows. It runs in an isolated
-context with exactly two capabilities: send HTTP requests, and drive a
-browser page. No files, no environment, no modules, no credentials. It is
+context with three capabilities: send HTTP requests, drive a browser page,
+and read the anonymous bearer a site mints for every visitor (the same
+token step the deterministic pipeline uses), which is the only credential
+it may send. No files, no environment, no modules. It is
 saved as `automation.mjs` in the session's folder, shown in full on the
 session page, and from then on every run of that session executes it: the
 Run, Bulk and export panels work unchanged.
@@ -320,8 +331,9 @@ provenance line on the page says it was refined, quoting the note. A failed
 attempt leaves the saved automation untouched.
 
 Budget rails, enforced in code: at most 16 model turns, 20 tool calls and 6
-script attempts per repair, plus a token ceiling; the console reports the
-estimated spend at the end. The default model is `claude-sonnet-5`;
+script attempts per repair, plus a token ceiling; a call repeated with the
+same arguments is refused from its third occurrence; the console reports
+the estimated spend at the end. The default model is `claude-sonnet-5`;
 `REPAIR_MODEL` in `.env` selects another. To enable the assistant, put
 `ANTHROPIC_API_KEY=...` in a `.env` file at the project root (gitignored)
 and restart the backend; without a key the button explains what is missing.

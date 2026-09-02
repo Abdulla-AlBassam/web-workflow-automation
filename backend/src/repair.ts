@@ -10,15 +10,24 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { analyse, leaves, markKey, markMatches, type Analysis } from './analyse.js';
 import { SPEC_VERSION, type Spec } from './generate.js';
+import type { RunResult } from '../../runner/src/run.js';
+import type { Bearer } from '../../runner/src/browser-token.js';
 import { SCRIPT_FILE, getMeta, getScript, getSpec, readEvents, saveMeta, saveScript, saveSpec, status } from './store.js';
 import { UA } from '../../runner/src/browser-token.js';
-import { browserSession, lintScript, runScript, type ScriptOk } from '../../runner/src/script.js';
+import { browserSession, cleanHeaders, lintScript, runScript, type ScriptOk } from '../../runner/src/script.js';
 
 export type Emit = (kind: string, text: string) => void;
 
 // Refining a saved automation: what the last run returned, as the session
-// page saw it, and the operator's note on what was wrong with it.
-export type RepairInput = { feedback?: string; lastRun?: unknown };
+// page saw it, and the operator's note on what was wrong with it. The two
+// callbacks let the loop execute a saved spec and mint tokens the way the
+// server does (cached per origin).
+export type RepairInput = {
+  feedback?: string;
+  lastRun?: unknown;
+  runSpec?: (spec: Spec, params: Record<string, string>) => Promise<RunResult>;
+  readToken?: (loadUrl: string) => Promise<Bearer | undefined>;
+};
 
 export const MODEL = process.env.REPAIR_MODEL ?? 'claude-sonnet-5';
 
@@ -49,13 +58,17 @@ TOOLS
 - probe: send one HTTP request and see the full response. Use it to test an endpoint you suspect (an API the page called on another host, a JSON variant of a JSONP call, a documented public API for the site), and to re-fetch bodies the recorder cut.
 - open_page: load a URL in a headless browser, optionally act on it (fill, click, press, wait), and read its text, an element's HTML, or the result of a JavaScript expression evaluated in the page. Use it when results are rendered server-side or built by page scripts with no plain API.
 - write_script: submit the script. It is linted, executed with the recorded inputs, and accepted only if it reproduces the recording (see ACCEPTANCE). On failure you get the reason and can submit again.
+- set_columns: REFINE mode only, when the saved automation is a deterministic spec (not a script) and the operator wants fewer or different fields. Keeps the saved automation exactly as it is (its token step, pagination, everything) and only changes which fields each row returns. Always prefer this over rewriting a working automation as a script.
 - give_up: when no automation is possible from this recording; say what the operator should do differently when re-recording.
+
+Do not repeat a call you have already made with the same arguments; the answer will not change. If the browser route is not producing results after two tries, step back: look for the API in the recording and use it directly.
 
 THE SCRIPT
 Plain JavaScript (no import, require, process, eval). Define:
   async function run(ctx) { ... return rows; }
 ctx.inputs   — the run's parameters, e.g. ctx.inputs.query (names given below). Read every parameter from here; never hard-code the recorded value.
 ctx.http.fetch(url, { method, headers, body }) → { status, ok, url, contentType, text, json() }. body may be an object (sent as JSON) or a string. Cookie/authorization headers are dropped.
+ctx.site.token(pageUrl) → the anonymous bearer the site mints for every visitor, read from its own web storage after loading pageUrl. Send it as headers: { authorization: 'Bearer ' + token }. This is the ONLY credential a script may send; any other authorization header is dropped. Use it whenever the API answers 401 (a saved automation with a browser-token step tells you the page URL to load).
 ctx.browser.open(url) → page. page.goto(url), fill(selector, text), click(selector), press(selector, key), waitFor(selector, ms) → boolean, wait(ms), text(selector?) → string, texts(selector) → string[], html(selector?) → string, attr(selector, name), eval(expression) → JSON value evaluated in the page (e.g. "[...document.querySelectorAll('.row')].map(r => ({ name: r.querySelector('.n')?.textContent }))"), url(), close().
 ctx.log(...)  — notes shown to the operator on failure. ctx.sleep(ms).
 Return an array of flat row objects — one row per result, plain string/number fields, named as a person would name columns. Prefer a direct API call over driving the browser; use the browser only when no request returns the data.
@@ -193,11 +206,11 @@ function rowText(row: unknown): string {
   return markKey([...leaves(row)].map(({ value }) => (typeof value === 'string' || typeof value === 'number' ? String(value) : '')).join(' '));
 }
 
-async function accept(source: string, params: { name: string; value: string }[], marks: string[], evidence: string[]): Promise<Verdict> {
+async function accept(source: string, params: { name: string; value: string }[], marks: string[], evidence: string[], readToken: ToolCtx['readToken']): Promise<Verdict> {
   const inputs = Object.fromEntries(params.map((p) => [p.name, p.value]));
   const lint = lintScript(source, inputs);
   if (lint.length) return { ok: false, reason: `lint: ${lint.join('; ')}` };
-  const run = await runScript(source, { inputs });
+  const run = await runScript(source, { inputs, readToken });
   if ('error' in run) {
     return { ok: false, reason: `the script failed: ${run.error}${run.log.length ? ` — log: ${run.log.slice(-5).join(' | ')}` : ''}` };
   }
@@ -257,7 +270,7 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
   } as Anthropic.Beta.BetaTool,
   {
     name: 'probe',
-    description: 'Send one HTTP request (no cookies, no credentials) and see the response: status, content type, length, JSON shape and the first 4000 characters. The full body is kept as a probe result for read_body.',
+    description: 'Send one HTTP request (no cookies, no credentials) and see the response: status, content type, length, JSON shape and the first 4000 characters. The full body is kept as a probe result for read_body. To call a token-gated API, pass bearerFrom: the page URL whose anonymous bearer should be read and sent.',
     input_schema: {
       type: 'object',
       properties: {
@@ -265,6 +278,7 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
         url: { type: 'string' },
         headers: { type: 'object', additionalProperties: { type: 'string' } },
         body: { description: 'request body: an object (sent as JSON) or a string' },
+        bearerFrom: { type: 'string', description: 'page URL to load for the site\'s anonymous bearer, sent as authorization' },
       },
       required: ['method', 'url'],
       additionalProperties: false,
@@ -313,6 +327,27 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: 'set_columns',
+    description: 'Refine mode, deterministic spec only: keep the saved automation and change which fields each row returns. Paths are relative to a record of the result set (dot-separated for nested fields). Verified by running the saved automation with the recorded input.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        columns: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { name: { type: 'string' }, path: { type: 'string' } },
+            required: ['name', 'path'],
+            additionalProperties: false,
+          },
+        },
+        summary: { type: 'string', description: 'one sentence: what changed and why' },
+      },
+      required: ['columns', 'summary'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'give_up',
     description: 'Declare that no automation can be derived from this recording, with concrete advice on how to re-record so that one can.',
     input_schema: {
@@ -332,6 +367,7 @@ type ToolCtx = {
   probes: { url: string; text: string }[];
   signal: AbortSignal;
   emit: Emit;
+  readToken: (loadUrl: string) => Promise<Bearer | undefined>;
 };
 
 function pageOf(text: string, offset: number | undefined, length: number | undefined, label: string): string {
@@ -359,17 +395,21 @@ async function runTool(name: string, input: Record<string, unknown>, ctx: ToolCt
   if (name === 'probe') {
     const method = String(input.method ?? 'GET').toUpperCase();
     const url = String(input.url ?? '');
-    const headers: Record<string, string> = { 'user-agent': UA, accept: 'application/json, text/html;q=0.9, */*;q=0.8' };
-    for (const [k, v] of Object.entries((input.headers as Record<string, string>) ?? {})) {
-      if (/cookie|authorization|x-api-key/i.test(k)) continue;
-      headers[k.toLowerCase()] = String(v);
+    const issued = new Set<string>();
+    let bearerNote = '';
+    if (typeof input.bearerFrom === 'string' && input.bearerFrom) {
+      const tok = await ctx.readToken(input.bearerFrom).catch(() => undefined);
+      if (!tok) return `probe not sent: no recognisable token after loading ${input.bearerFrom}`;
+      issued.add(tok.bearer);
+      bearerNote = ` with the bearer from ${tok.source}`;
     }
+    const headers = cleanHeaders({ ...((input.headers as Record<string, string>) ?? {}), ...(issued.size ? { authorization: `Bearer ${[...issued][0]}` } : {}) }, issued);
     let body: string | undefined;
     if (input.body !== undefined && input.body !== null) {
       body = typeof input.body === 'string' ? input.body : JSON.stringify(input.body);
       if (typeof input.body !== 'string' && !headers['content-type']) headers['content-type'] = 'application/json; charset=utf-8';
     }
-    ctx.emit('tool', `probe ${method} ${url}`);
+    ctx.emit('tool', `probe ${method} ${url}${bearerNote}`);
     try {
       const res = await fetch(url, { method, headers, ...(body === undefined ? {} : { body }), signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(30_000)]) });
       const text = (await res.text()).slice(0, 8 * 1024 * 1024);
@@ -410,6 +450,49 @@ async function runTool(name: string, input: Record<string, unknown>, ctx: ToolCt
     }
   }
   return `unknown tool ${name}`;
+}
+
+// --- set_columns ---------------------------------------------------------------
+
+function resolvePath(obj: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((n, k) => (n && typeof n === 'object' ? (n as Record<string, unknown>)[k] : undefined), obj);
+}
+
+// Keep a working deterministic automation and change only its projection.
+// Verified by running the saved spec with the recorded input: every column
+// must resolve to a value in at least one record, and the marks (if any)
+// must still be among the returned fields.
+async function setColumns(
+  args: Record<string, unknown>, existing: Spec | undefined, isScript: boolean,
+  params: { name: string; value: string }[], marks: string[],
+  runSpec: RepairInput['runSpec'], emit: Emit,
+): Promise<{ saved: Spec; note: string } | { reason: string }> {
+  if (!existing || isScript) return { reason: 'set_columns applies only to a saved deterministic automation; this session has none' };
+  if (!runSpec) return { reason: 'the saved automation cannot be executed here' };
+  const cols = Array.isArray(args.columns) ? (args.columns as { name?: unknown; path?: unknown }[])
+    .map((c) => ({ name: String(c.name ?? '').trim().slice(0, 60), path: String(c.path ?? '').trim() }))
+    .filter((c) => c.name && c.path) : [];
+  if (!cols.length) return { reason: 'no columns given' };
+  emit('try', `set_columns ${cols.map((c) => `${c.name}←${c.path}`).join(', ')} — running the saved automation with the recorded input…`);
+  const bare: Spec = { ...existing, outcome: { ...existing.outcome, columns: undefined } };
+  const result = await runSpec(bare, Object.fromEntries(params.map((p) => [p.name, p.value])));
+  if (!result.ok) return { reason: `the saved automation stopped: ${result.stoppedReason}` };
+  const rows = ((result.extracted?.records as { rows?: unknown[] } | undefined)?.rows ?? []);
+  if (!rows.length) return { reason: 'the saved automation returned no rows for the recorded input' };
+  const empty = cols.filter((c) => !rows.some((r) => { const v = resolvePath(r, c.path); return v !== undefined && v !== null && v !== ''; }));
+  if (empty.length) {
+    return { reason: `no record has a value at ${empty.map((c) => `"${c.path}"`).join(', ')}. Fields of the first record: ${Object.keys(rows[0] as object).join(', ')}` };
+  }
+  const projected = rows.map((r) => Object.fromEntries(cols.map((c) => [c.name, resolvePath(r, c.path)])));
+  const missing = marks.filter((m) => !projected.some((r) => [...leaves(r)].some(({ value }) => markMatches(value, m))));
+  if (missing.length) return { reason: `the chosen fields drop the operator's marked selection(s) ${missing.map(shortMark).join(', ')}; include the field(s) that carry them` };
+  const saved: Spec = {
+    ...existing,
+    outcome: { ...existing.outcome, columns: cols.map((c) => ({ name: c.name, path: c.path, scope: 'row' as const })) },
+    repaired: { at: new Date().toISOString(), model: MODEL, diagnosis: String(args.summary ?? 'columns changed').slice(0, 600), mode: 'refine' },
+  };
+  emit('ok', `verified: ${rows.length} row(s), fields ${cols.map((c) => c.name).join(', ')}`);
+  return { saved, note: `now returns ${cols.map((c) => c.name).join(', ')} (${rows.length} row(s) for the recorded input)` };
 }
 
 // --- the loop ----------------------------------------------------------------
@@ -453,10 +536,13 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
   }
 
   const firstPage = events.find((e) => e.kind === 'page' && typeof e.url === 'string')?.url as string | undefined;
+  const tokenStep = existing?.steps.find((s) => s.type === 'browser-token');
   const pack = [
     ...(existing ? [
       'MODE: REFINE. The session already has an automation, but its result did not match what the operator wanted.',
       `Current automation: ${describeSpec(existing, existingScript ? getScript(id, existingScript.file) : undefined)}`,
+      ...(existingScript ? [] : ['The saved automation is a deterministic spec that works: if the operator wants fewer or different fields, use set_columns and keep it. Write a script only if the outcome itself must change.']),
+      ...(tokenStep ? [`The saved automation obtains the site's anonymous bearer by loading ${tokenStep.loadUrl} (browser-token step). A script reaches the same API with: const token = await ctx.site.token(${JSON.stringify(tokenStep.loadUrl)}); then headers: { authorization: 'Bearer ' + token }. A probe reaches it with bearerFrom: ${JSON.stringify(tokenStep.loadUrl)}.`] : []),
       `Last run (what the operator received): ${input.lastRun === undefined ? 'not reported' : describeRun(input.lastRun)}`,
       `Operator feedback: ${feedback ? `"${feedback}"` : 'none — compare the marked selections with the last run yourself'}`,
       '',
@@ -482,7 +568,9 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
     return;
   }
 
-  const ctx: ToolCtx = { events, probes: [], signal, emit };
+  const readToken = input.readToken ?? (async (loadUrl: string) => (await import('../../runner/src/browser-token.js')).readBearerViaBrowser(loadUrl));
+  const ctx: ToolCtx = { events, probes: [], signal, emit, readToken };
+  const seen = new Map<string, number>();
   const usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
   let toolCalls = 0;
   let scriptTries = 0;
@@ -579,7 +667,7 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
         const title = String(args.title ?? '').slice(0, 80);
         const summary = String(args.summary ?? '').slice(0, 600);
         emit('try', `Script attempt ${scriptTries}: executing with the recorded input(s)… (${source.length} chars)`);
-        const v = await accept(source, params, marks, evidence);
+        const v = await accept(source, params, marks, evidence, readToken);
         if (v.ok) {
           emit('ok', `verified: ${v.note}; ${v.run.rows.length} row(s), columns ${v.columns.join(', ')}, hosts ${v.run.hosts.join(', ') || 'none'}, ${(v.run.ms / 1000).toFixed(1)}s`);
           save(source, title, summary, v.run, v.note);
@@ -598,8 +686,28 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
         results.push({ type: 'tool_result', tool_use_id: use.id, content: `REJECTED: ${v.reason}`, is_error: true });
         continue;
       }
+      if (use.name === 'set_columns') {
+        const out = await setColumns(args, existing, existingScript !== undefined, params, marks, input.runSpec, emit);
+        if ('saved' in out) {
+          saveSpec(id, out.saved);
+          emit('saved', `Automation updated — ${out.note}. Run it with any new input.`);
+          finish('done', 'Done.');
+          return;
+        }
+        results.push({ type: 'tool_result', tool_use_id: use.id, content: `REJECTED: ${out.reason}`, is_error: true });
+        continue;
+      }
       if (toolCalls > MAX_TOOL_CALLS) {
         results.push({ type: 'tool_result', tool_use_id: use.id, content: 'Tool budget exhausted: submit write_script now with your best script, or give_up.', is_error: true });
+        continue;
+      }
+      // The same call with the same arguments returns the same answer; the
+      // third repetition is refused so a stuck loop cannot spend the budget.
+      const key = `${use.name}:${JSON.stringify(args)}`;
+      const times = (seen.get(key) ?? 0) + 1;
+      seen.set(key, times);
+      if (times >= 3) {
+        results.push({ type: 'tool_result', tool_use_id: use.id, content: `You have already made this exact call ${times - 1} times; the result will not change. Take a different approach (the API in the recording, ctx.site.token for a 401, set_columns for fewer fields) or give_up.`, is_error: true });
         continue;
       }
       if (use.name === 'read_body') emit('tool', `read_body ${typeof args.probe === 'number' ? `probe #${args.probe}` : `#${args.seq}`}${args.offset ? ` from ${args.offset}` : ''}`);

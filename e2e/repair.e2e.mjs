@@ -16,6 +16,9 @@ import { join } from 'node:path';
 const BACKEND_PORT = 4893;
 const LLM_PORT = 4987;
 const SITE_PORT = 4989;
+const SITES_PORT = 4991; // fixtures/sites.mjs, for the token-gated shape
+const TOK = `http://127.0.0.1:${SITES_PORT}`;
+const FAKE_JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJhbm9uIjp0cnVlLCJzY29wZSI6InB1YmxpYyJ9.c2lnbmF0dXJl';
 const BACKEND = `http://127.0.0.1:${BACKEND_PORT}`;
 const SITE = `http://127.0.0.1:${SITE_PORT}`;
 
@@ -36,6 +39,7 @@ async function ensureFree(port) {
 await ensureFree(BACKEND_PORT);
 await ensureFree(LLM_PORT);
 await ensureFree(SITE_PORT);
+await ensureFree(SITES_PORT);
 
 // --- mini-site ---------------------------------------------------------------
 const ARTICLES = [
@@ -119,6 +123,17 @@ const SSR_SCRIPT = `async function run(ctx) {
   await page.close();
   return rows;
 }`;
+// Token-gated API (the Sijilat shape): only the bearer the site itself mints
+// may be sent; a forged one is dropped and the API answers 401.
+const GATED_FORGED = `async function run(ctx) {
+  const res = await ctx.http.fetch('${TOK}/tokened/api/search', { method: 'POST', headers: { authorization: 'Bearer forged' }, body: { q: ctx.inputs.query } });
+  return (res.json().rows || []).map((r) => ({ name: r.name, city: r.city }));
+}`;
+const GATED_SCRIPT = `async function run(ctx) {
+  const token = await ctx.site.token('${TOK}/tokened/');
+  const res = await ctx.http.fetch('${TOK}/tokened/api/search', { method: 'POST', headers: { authorization: 'Bearer ' + token }, body: { q: ctx.inputs.query } });
+  return res.json().rows.map((r) => ({ name: r.name, city: r.city }));
+}`;
 const ZERO_PARAM = `async function run(ctx) {
   const res = await ctx.http.fetch('${SUGGEST}?q=');
   return res.json().results.map((r) => ({ name: r.name, cr: r.cr }));
@@ -143,6 +158,11 @@ const scripts = [
   [tool('write_script', { source: ZERO_PARAM, title: 'All Companies', summary: 'Lists every company.' })],
   // --- giveup: an honest stop.
   [tool('give_up', { reason: 'The data is only ever rendered as an image.', advice: 'Re-record on a page that lists the results as text.' })],
+  // --- gated, refine 1: keep the deterministic spec, change the fields.
+  [tool('set_columns', { columns: [{ name: 'name', path: 'name' }, { name: 'city', path: 'city' }], summary: 'Only name and city.' })],
+  // --- gated, refine 2: a forged bearer fails, the site's own bearer works.
+  [tool('write_script', { source: GATED_FORGED, title: 'Gated Search', summary: 'Calls the API.' })],
+  [tool('write_script', { source: GATED_SCRIPT, title: 'Gated Search', summary: 'Calls the API with the anonymous bearer the site mints.' })],
 ];
 // After the script runs out the model probes forever, two at a time: the
 // loop's own budget must end it.
@@ -177,6 +197,8 @@ const llm = createServer((req, res) => {
   });
 });
 llm.listen(LLM_PORT);
+
+const sites = spawn('node', ['fixtures/sites.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: String(SITES_PORT) }, stdio: 'ignore' });
 
 const dataDir = mkdtempSync(join(tmpdir(), 'wfr-repair-'));
 const backend = spawn('npx', ['tsx', 'backend/src/server.ts'], {
@@ -376,6 +398,39 @@ try {
   check('give_up ends with advice and no spec',
     giveLines.some((l) => l.kind === 'advice' && /Re-record on a page/.test(l.text)) && !existsSync(join(dataDir, 'giveup', 'spec.json')), JSON.stringify(giveLines));
 
+  // Scenario 8b: a token-gated API (the Sijilat shape). The deterministic
+  // spec carries a token step; set_columns keeps it and narrows the fields;
+  // a script reaches the same API only with the bearer the site mints.
+  await wait(`${TOK}/tokened/`);
+  const gatedBody = await fetch(`${TOK}/tokened/api/search`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${FAKE_JWT}` }, body: '{"q":"gum"}' }).then((r) => r.text());
+  const gatedStop = await record('gated', [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${TOK}/tokened/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'gum', target: { id: 'q' }, seq: 2 },
+    { kind: 'net', api: 'fetch', method: 'POST', url: `${TOK}/tokened/api/search`, status: 200, contentType: 'application/json', reqBody: '{"q":"gum"}', resBody: gatedBody, seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]);
+  const gatedSpec = readSpec('gated');
+  check('gated: deterministic spec with a token step', gatedStop.spec !== false && gatedSpec.steps.some((st) => st.type === 'browser-token'), JSON.stringify(gatedSpec.steps));
+  const gatedCols = await repair('gated', { feedback: 'only the name and the city', lastRun: { params: { query: 'gum' }, ok: true, rowCount: 8, columns: ['id', 'name', 'city', 'active', 'tags', 'notes'] } });
+  check('gated: set_columns verified by running the saved automation and saved',
+    gatedCols.some((l) => l.kind === 'ok' && /fields name, city/.test(l.text)) && gatedCols.some((l) => l.kind === 'saved' && /now returns name, city/.test(l.text)), JSON.stringify(gatedCols));
+  const gatedAfter = readSpec('gated');
+  check('gated: spec kept its token step, gained the columns and refine provenance',
+    gatedAfter.steps.some((st) => st.type === 'browser-token') && gatedAfter.outcome.columns?.length === 2 && gatedAfter.repaired?.mode === 'refine', JSON.stringify(gatedAfter.outcome));
+  check('gated: the model was told how a script reaches the token',
+    JSON.stringify(llmRequests.at(-1)).includes('ctx.site.token(') && JSON.stringify(llmRequests.at(-1)).includes('use set_columns'));
+  const gatedRun = await api('/api/sessions/gated/run', { params: { query: 'gulf' } });
+  check('gated: narrowed run returns only the chosen fields',
+    gatedRun.ok && JSON.stringify(Object.keys(gatedRun.extracted?.records?.rows?.[0] ?? {})) === '["name","city"]', gatedRun.stoppedReason ?? JSON.stringify(gatedRun));
+  const gatedScript = await repair('gated', { feedback: 'rewrite it as a script', lastRun: { params: { query: 'gum' }, ok: true, rowCount: 8, columns: ['name', 'city'] } });
+  check('gated: a forged bearer is dropped and the attempt fails',
+    gatedScript.filter((l) => l.kind === 'try').length === 2 && gatedScript.some((l) => l.kind === 'fail'), JSON.stringify(gatedScript));
+  check('gated: the site\'s own bearer is accepted', gatedScript.some((l) => l.kind === 'saved') && readScript('gated').includes('ctx.site.token'), JSON.stringify(gatedScript));
+  const gatedScriptRun = await api('/api/sessions/gated/run', { params: { query: 'gulf' } });
+  check('gated: the script replays through the token',
+    gatedScriptRun.ok && gatedScriptRun.steps[0].type === 'script' && gatedScriptRun.extracted?.records?.rows?.[0]?.name === 'Gulf Gum Trading', gatedScriptRun.stoppedReason ?? JSON.stringify(gatedScriptRun));
+
   // Scenario 9: a model that never stops investigating hits the budget.
   await record('loop', jsonpEvents());
   const loopLines = await repair('loop');
@@ -383,12 +438,15 @@ try {
     loopLines.some((l) => l.kind === 'done' && /No working automation found after 16 turns/.test(l.text)) && !existsSync(join(dataDir, 'loop', 'spec.json')),
     JSON.stringify(loopLines.slice(-3)));
   check('tool budget message reached the model, parallel calls counted',
-    JSON.stringify(llmRequests.at(-1)).includes('Tool budget exhausted') && loopLines.filter((l) => l.kind === 'tool').length === 20,
+    JSON.stringify(llmRequests.at(-1)).includes('Tool budget exhausted'));
+  check('an identical call is refused from its third repetition',
+    JSON.stringify(llmRequests.at(-1)).includes('already made this exact call') && loopLines.filter((l) => l.kind === 'tool').length === 4,
     String(loopLines.filter((l) => l.kind === 'tool').length));
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {
   backend.kill();
+  sites.kill();
   site.close();
   llm.close();
   rmSync(dataDir, { recursive: true, force: true });

@@ -6,6 +6,12 @@
 //
 //   http.fetch(url, { method, headers, body })  → { status, ok, contentType, text, json() }
 //   browser.open(url)                          → a page handle (fill/click/press/wait/text/texts/html/attr/eval/url)
+//   site.token(pageUrl)                        → the anonymous bearer the site mints for every visitor
+//
+// The token is the one credential a script may send: read from the site's
+// own web storage after loading the page (the runner's browser-token step),
+// never typed by anyone. An authorization header carrying anything else is
+// dropped.
 //
 // Hosts: on the acceptance run (hosts undefined) any http(s) host may be
 // contacted and the hosts actually used are collected; the saved spec keeps
@@ -17,7 +23,7 @@
 // the session page, and executed only after it reproduced the recording.
 import { createContext, Script } from 'node:vm';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { UA } from './browser-token.js';
+import { UA, readBearerViaBrowser, type Bearer } from './browser-token.js';
 
 export type ScriptOk = { rows: Record<string, unknown>[]; hosts: string[]; log: string[]; ms: number };
 export type ScriptFail = { error: string; hosts: string[]; log: string[] };
@@ -27,6 +33,8 @@ export type ScriptOptions = {
   inputs: Record<string, string>;
   hosts?: string[];
   timeoutMs?: number;
+  // How the anonymous bearer is obtained (the backend caches per origin).
+  readToken?: (loadUrl: string) => Promise<Bearer | undefined>;
 };
 
 const FORBIDDEN_HEADER = /cookie|authorization|x-api-key|proxy-authorization/i;
@@ -53,12 +61,16 @@ class HostGuard {
   }
 }
 
-function cleanHeaders(h: unknown): Record<string, string> {
+// Headers a script asked for, minus anything credential-shaped. The one
+// exception is a bearer the site itself issued through site.token().
+export function cleanHeaders(h: unknown, issued: Set<string> = new Set()): Record<string, string> {
   const out: Record<string, string> = {};
   if (h && typeof h === 'object') {
     for (const [k, v] of Object.entries(h as Record<string, unknown>)) {
+      const value = String(v);
+      if (/^authorization$/i.test(k) && issued.has(value.replace(/^Bearer\s+/i, ''))) { out.authorization = value; continue; }
       if (FORBIDDEN_HEADER.test(k)) continue;
-      out[k.toLowerCase()] = String(v);
+      out[k.toLowerCase()] = value;
     }
   }
   if (!out['user-agent']) out['user-agent'] = UA;
@@ -66,12 +78,12 @@ function cleanHeaders(h: unknown): Record<string, string> {
   return out;
 }
 
-function makeHttp(guard: HostGuard, signal: AbortSignal) {
+function makeHttp(guard: HostGuard, signal: AbortSignal, issued: Set<string>) {
   return {
     async fetch(url: string, init?: { method?: string; headers?: Record<string, string>; body?: unknown }) {
       guard.check(url);
       const method = (init?.method ?? 'GET').toUpperCase();
-      const headers = cleanHeaders(init?.headers);
+      const headers = cleanHeaders(init?.headers, issued);
       let body: string | undefined;
       if (init?.body !== undefined && init.body !== null) {
         body = typeof init.body === 'string' ? init.body : JSON.stringify(init.body);
@@ -214,13 +226,24 @@ export async function runScript(source: string, options: ScriptOptions): Promise
   const guard = new HostGuard(options.hosts);
   const abort = new AbortController();
   const browser = makeBrowser(guard, abort.signal);
+  const issued = new Set<string>();
+  const readToken = options.readToken ?? readBearerViaBrowser;
   const finish = (r: ScriptResult) => r;
   try {
     const { run } = compileScript(source);
     const ctx = {
       inputs: { ...options.inputs },
-      http: makeHttp(guard, abort.signal),
+      http: makeHttp(guard, abort.signal, issued),
       browser: { open: browser.open },
+      site: {
+        async token(pageUrl: string) {
+          guard.check(pageUrl);
+          const tok = await readToken(pageUrl);
+          if (!tok) throw new Error(`site issued no recognisable token after loading ${pageUrl}`);
+          issued.add(tok.bearer);
+          return tok.bearer;
+        },
+      },
       log: (...args: unknown[]) => { if (log.length < 200) log.push(args.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ').slice(0, 500)); },
       sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, Math.min(Math.max(0, ms), 20_000))),
     };
