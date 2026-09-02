@@ -235,6 +235,36 @@ against what you marked. Only a program that passes is kept, and from then
 on it is what runs for that session. The assistant never changes the tool
 itself, never runs anything unchecked, and never sees or sends credentials.
 
+What the assistant can do:
+
+- Read the whole recording, every captured body in full.
+- Send its own requests and see the full response: an API on another host,
+  the JSON form of a JSONP call, a public API it knows for the site, a
+  body the recorder cut.
+- Open a page in a hidden browser, type and click on it, and read what
+  appears, including results that only exist as rendered HTML.
+- Write a script for that one session, retry when the check rejects it,
+  and refine a saved automation the operator has flagged.
+
+What it cannot do:
+
+- Change the tool. It writes a program for one session; the recorder, the
+  analyser, the runner and its own rules stay as they are.
+- Save anything unchecked. A script is kept only after the tool has run it
+  with the recorded input and found the marked text in the rows.
+- Log in, pass a CAPTCHA, or send a cookie. Credentials are never recorded,
+  and a cookie or authorisation header in a script is dropped.
+- Reach beyond the hosts it proved. The saved script is confined to the
+  hosts it contacted during the check.
+- Touch the machine: no files, no environment, no modules, no other
+  programs.
+- See traffic the recorder never saw (WebSockets, cross-origin iframes).
+- Work from a recording with nothing typed and nothing marked.
+- Run without limit. Turns, tool calls, script attempts and tokens are
+  capped, and the spend is reported.
+- Future-proof anything. If the site changes, the script fails honestly
+  and Fix with LLM is one click away.
+
 The division of labour is strict. The model investigates and writes;
 deterministic code decides.
 
