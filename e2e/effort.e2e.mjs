@@ -289,7 +289,7 @@ try {
     JSON.stringify(log.map((l) => l.kind)));
   const page = await fetch(`${BACKEND}/session/shop`).then((r) => r.text());
   check('session page shows the mode, its provenance, and the past conversation',
-    page.includes('Maximum Effort Mode') && page.includes('Built in Maximum Effort Mode') && page.includes('The final page lists five hubs') && page.includes('Start again') && page.includes(GOAL));
+    page.includes('Maximum Effort Mode') && page.includes('Built in Maximum Effort Mode') && page.includes('The final page lists five hubs') && page.includes('Export brief') && page.includes(GOAL));
   check('session page scripts parse', scriptsCompile(page) === '', scriptsCompile(page));
   const pack = llmRequests[0]?.messages?.[0]?.content?.[0]?.text ?? '';
   check('the pack showed the route, the snapshots and the typed labels',

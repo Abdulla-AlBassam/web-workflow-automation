@@ -3,7 +3,7 @@ import { requestHeaders } from './probe.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 14;
+export const SPEC_VERSION = 15;
 
 export type Spec = {
   version: number;
@@ -97,12 +97,15 @@ function embedTemplatise(body: unknown, embeds: { token: string; name: string; v
 
 // The parameter takes the field's own id when that id reads like a name a
 // person chose (letters first, three characters or more, no generated
-// numeric suffix such as "input-3" or "mat-input-0", not a generic word).
-// Anything else becomes "query". Shared with the repair loop so a script and
-// a deterministic spec name the same parameter for the same field.
+// numeric suffix such as "input-3" or "mat-input-0", at most one digit run
+// so eBay-style generated ids like "s0-2-46-0-9-…-textbox" never surface as
+// names, not a generic word). Anything else becomes "query". Shared with the
+// repair loop so a script and a deterministic spec name the same parameter
+// for the same field.
 export function paramName(field: string): string {
   const id = field.replace(/[^\w]/g, '_');
-  const chosen = /^[A-Za-z]/.test(id) && id.length >= 3 && !/[_-]?\d+$/.test(id) && !/^(field|input|text|textbox|value)$/i.test(id);
+  const chosen = /^[A-Za-z]/.test(id) && id.length >= 3 && !/[_-]?\d+$/.test(id)
+    && (id.match(/\d+/g) ?? []).length < 2 && !/^(field|input|text|textbox|value)$/i.test(id);
   return chosen ? id : 'query';
 }
 

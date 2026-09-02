@@ -308,7 +308,8 @@ app.get('/session/:id', async (req, reply) => {
   reply.type('text/html');
   const spec = await freshSpec(id) as { steps?: { type: string; file?: string }[] } | undefined;
   const scriptStep = spec?.steps?.find((s) => s.type === 'script');
-  return renderDetail(meta, status(meta), a, events, spec, scriptStep?.file ? getScript(id, scriptStep.file) : undefined, readLog(id));
+  const sessions = listSessions().map((m) => ({ ...m, st: status(m) }));
+  return renderDetail(meta, status(meta), a, events, spec, scriptStep?.file ? getScript(id, scriptStep.file) : undefined, readLog(id), sessions);
 });
 
 const port = Number(process.env.PORT ?? 4823);
