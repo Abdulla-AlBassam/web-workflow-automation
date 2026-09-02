@@ -14,11 +14,13 @@ the result is the server's structured JSON rather than scraped HTML. Browser
 steps still exist, but only for the parts a plain HTTP request cannot reach.
 
 Demonstrated on the public Sijilat commercial-registry lookup and generalised
-against wwe.com, Wikipedia and the Swiss company register (zefix.ch), all
-handled deterministically; Nominatim and Hacker News search (Algolia) went
-through the LLM repair assistant, each fixed in two turns. The recorder and
-analysis are site-agnostic. An example Sijilat session export and its
-generated spec are in `fixtures/`.
+against wwe.com and the Swiss company register (zefix.ch) deterministically.
+Wikipedia went both ways: deterministic when recorded from the site's own
+search box, through the LLM repair assistant when recorded from the JSONP
+portal. Nominatim and Hacker News search (Algolia) went through the
+assistant, each fixed in two turns. The recorder and analysis are
+site-agnostic. An example Sijilat session export and its generated spec are
+in `fixtures/`.
 
 ## How it works
 
@@ -91,7 +93,9 @@ one saved by an older generator regenerates automatically before use.
 The runner takes a spec plus new input values, executes the steps, validates
 the outcome against what the recording promised, and stops with a named
 reason on any mismatch: no token found, endpoint changed, selector no longer
-matches, empty search. It never guesses past a failure.
+matches, a search that returned nothing for a chain to follow. A plain
+search with no results is a successful run with zero rows. It never guesses
+past a failure.
 
 ## Using it
 
@@ -175,37 +179,41 @@ that fails, the LLM repair assistant (next section) can investigate and
 write a script for the session. The limits below say which layer each
 falls on, and which are policy lines drawn on purpose.
 
-The deterministic pipeline refuses, and the assistant usually recovers:
+The deterministic pipeline refuses, and the assistant can recover. Each
+line says how that recovery has been checked: live on a real site, in the
+test suite against a mock model, or not yet:
 
-- **Values transformed before sending.** A typed date sent as an epoch, a
-  dropdown choice sent as its numeric id. Correlation is verbatim, so the
-  pipeline refuses; a session script can apply the transformation.
 - **JSONP and script-tag traffic.** Invisible to fetch/XHR interception;
   only the URL is recorded. The assistant probes the plain-JSON form of the
-  same endpoint.
+  same endpoint. Live: Wikipedia portal.
+- **Responses larger than the recorder keeps.** A body over 2 MB is cut and
+  the cut declared; the assistant fetches it in full. Live: Nominatim.
 - **Server-rendered result lists.** HTML results with no API behind them
   (older sites, Next.js/RSC). The pipeline has no call to promote; a session
-  script can drive a browser page and read the list.
-- **Responses larger than the recorder keeps.** A body over 2 MB is cut and
-  the cut declared; the assistant fetches it in full.
+  script drives a browser page and reads the list. Suite only.
 - **Nothing typed, something marked.** A browse-only recording of a listing
-  has no parameter; the assistant can still derive a zero-parameter
-  automation from the marks.
+  has no parameter; the assistant derives a zero-parameter automation from
+  the marks. Suite only.
+- **Values transformed before sending.** A typed date sent as an epoch, a
+  dropdown choice sent as its numeric id. Correlation is verbatim, so the
+  pipeline refuses; a session script could apply the transformation. Not
+  yet exercised.
 
 Nobody can, and the tool says so:
 
 - **WebSockets and cross-origin iframes.** Not captured; a script could only
   guess at them, and guesses are not accepted.
 - **Per-request signing, nonces and CSRF tokens.** If every request must be
-  minted by page JavaScript, no direct call can be generated; a session
-  script that drives the page in a browser may still work, at browser speed.
-  (Anonymous token minting, as on Sijilat, is a reusable value parked in web
-  storage, not signing, and is handled deterministically.)
+  minted by page JavaScript, no direct call can be generated. A session
+  script that drives the page in a browser might still work, at browser
+  speed; this has not been exercised. (Anonymous token minting, as on
+  Sijilat, is a reusable value parked in web storage, not signing, and is
+  handled deterministically.)
 - **Logins, CAPTCHAs and bot walls.** Out of scope by design. No credential
   capture, no CAPTCHA bypass, no authenticated areas: cookies and auth
-  headers are never kept, scripts cannot send them, and a cookie-session API
-  replays as 401. A site behind a Cloudflare challenge will not record
-  usefully.
+  headers are never kept and scripts cannot send them, so an API that needs
+  a logged-in session cannot be replayed. A site behind a Cloudflare
+  challenge did not record usefully (iNaturalist).
 - **Non-text outcomes.** PDF, CSV downloads and images are not structured
   in the tool's sense.
 
@@ -263,6 +271,7 @@ What the assistant can do:
   appears, including results that only exist as rendered HTML.
 - Use the anonymous bearer a site mints for every visitor (the Sijilat
   shape), read from the site's own web storage, to call a token-gated API.
+  Covered by the suite against a mock site; not yet needed live.
 - Write a script for that one session, retry when the check rejects it,
   and refine a saved automation the operator has flagged.
 - Narrow a working automation to the fields the operator wants without
@@ -384,7 +393,7 @@ extension/   MV3 recorder (popup, content script, MAIN-world network tap)
 backend/     Fastify: event store, redaction, analysis, spec generation, UI
 runner/      Spec execution: direct requests, token discovery, extraction
 fixtures/    Local mock site, banked traces and specs (tests and demos)
-e2e/         Capture e2e (real Chromium), failure paths, enhancements
+e2e/         Capture e2e (real Chromium), failure paths, enhancements, scenario matrix, repair loop
 docs/        Spec format, site evidence, UI rules
 ```
 
