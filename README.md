@@ -7,8 +7,8 @@ automation that reproduces that outcome for any new input.
 
 The recording is evidence, not the automation. Instead of replaying clicks
 the way browser-robot tools do (Browse AI, Octoparse, Axiom), the analysis
-reverse-engineers the recording down to the site's own API call — the
-structured HTTP request the page's JavaScript makes to fetch its data — and
+reverse-engineers the recording down to the site's own API call: the
+structured HTTP request the page's JavaScript makes to fetch its data, and
 invokes it directly. Per run that is faster and cheaper than driving a browser, and
 the result is the server's structured JSON rather than scraped HTML. Browser
 steps still exist, but only for the parts a plain HTTP request cannot reach.
