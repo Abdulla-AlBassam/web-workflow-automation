@@ -71,6 +71,10 @@ reproduces the outcome:
   response, best-matching row first.
 - `browser-extract` — for server-rendered outcomes: loads the linked page
   and reads the operator-marked selectors as columns.
+- `script`: a per-session program written by the LLM repair assistant when
+  none of the above can be derived (see the repair section). It runs in an
+  isolated context, returns the rows itself, and is confined to the hosts it
+  was verified against.
 
 If a numeric page field in the request pairs with a total in the response,
 the spec records it and runs fetch every page, not just the first. Marked
