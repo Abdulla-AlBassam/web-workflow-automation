@@ -14,7 +14,11 @@ the result is the server's structured JSON rather than scraped HTML. Browser
 steps still exist, but only for the parts a plain HTTP request cannot reach.
 
 Demonstrated on the public Sijilat commercial-registry lookup and generalised
-against wwe.com; the recorder and analysis are site-agnostic.
+against wwe.com, Wikipedia and the Swiss company register (zefix.ch), all
+handled deterministically; Nominatim and Hacker News search (Algolia) went
+through the LLM repair assistant, each fixed in two turns. The recorder and
+analysis are site-agnostic. An example Sijilat session export and its
+generated spec are in `fixtures/`.
 
 ## How it works
 
