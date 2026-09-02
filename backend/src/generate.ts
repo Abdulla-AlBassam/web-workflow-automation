@@ -1,8 +1,8 @@
-import { embeddedTokenRegex, leaves, markKey, markMatches, type Analysis, type Call, type Match } from './analyse.js';
+import { compositeMatches, embeddedTokenRegex, leaves, markKey, markMatches, objectHasMark, type Analysis, type Call, type Match } from './analyse.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 11;
+export const SPEC_VERSION = 12;
 
 export type Spec = {
   version: number;
@@ -158,27 +158,41 @@ export function locateColumns(body: unknown, recordsPath: string | undefined, ma
       const rank = (markKey(String(value)) === m ? 2 : 0) + (inRows(path) ? 1 : 0);
       if (!hit || rank > hit.rank) hit = { path, rank };
     }
-    if (!hit) continue;
-    let path = hit.path;
-    let scope: 'row' | 'body' = 'body';
-    if (inRows(path)) {
-      // Drop the row's own index or key: records may be keyed by id.
-      path = path.slice(recordsPath!.length + 1).replace(/^[^.]+\.?/, '');
-      scope = 'row';
+    const add = (full: string) => {
+      let path = full;
+      let scope: 'row' | 'body' = 'body';
+      if (inRows(path)) {
+        // Drop the row's own index or key: records may be keyed by id.
+        path = path.slice(recordsPath!.length + 1).replace(/^[^.]+\.?/, '');
+        scope = 'row';
+      }
+      if (cols.some((c) => c.path === path && c.scope === scope)) return;
+      const base = path.split('.').at(-1) || 'value';
+      let name = base;
+      for (let i = 2; cols.some((c) => c.name === name); i++) name = `${base}_${i}`;
+      cols.push({ name, path, scope });
+    };
+    if (hit) { add(hit.path); continue; }
+    // No single field carries the selection: it may span several cells of
+    // one record. Try each record on its own, best coverage wins.
+    const groups = new Map<string, { path: string; value: unknown }[]>();
+    for (const f of leaves(body)) {
+      const key = inRows(f.path) ? f.path.slice(0, recordsPath!.length + 1) + f.path.slice(recordsPath!.length + 1).split('.')[0] : '';
+      (groups.get(key) ?? groups.set(key, []).get(key)!).push(f);
     }
-    if (cols.some((c) => c.path === path && c.scope === scope)) continue;
-    const base = path.split('.').at(-1) || 'value';
-    let name = base;
-    for (let i = 2; cols.some((c) => c.name === name); i++) name = `${base}_${i}`;
-    cols.push({ name, path, scope });
+    let best: { path: string; at: number }[] = [];
+    for (const fields of groups.values()) {
+      const found = compositeMatches(mark, fields);
+      if (found.length > best.length) best = found;
+    }
+    for (const f of best) add(f.path);
   }
   return cols.length ? cols : undefined;
 }
 
 // Marked selections no field of the response carries, for honest reporting.
 export function missingMarks(body: unknown, marks: string[]): string[] {
-  const all = [...leaves(body)];
-  return marks.filter((mark) => !all.some(({ value }) => markMatches(value, mark)));
+  return marks.filter((mark) => !objectHasMark(body, mark));
 }
 
 // Page-based outcome: a numeric request field named like "page" plus a total

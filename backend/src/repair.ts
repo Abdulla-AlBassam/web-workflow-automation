@@ -8,7 +8,7 @@
 // session executes that script. The LLM investigates and writes;
 // deterministic code decides. Nothing unverified ever becomes a spec.
 import Anthropic from '@anthropic-ai/sdk';
-import { analyse, leaves, markKey, markMatches, type Analysis } from './analyse.js';
+import { analyse, leaves, markKey, objectHasMark, type Analysis } from './analyse.js';
 import { SPEC_VERSION, type Spec } from './generate.js';
 import type { RunResult } from '../../runner/src/run.js';
 import type { Bearer } from '../../runner/src/browser-token.js';
@@ -218,7 +218,7 @@ async function accept(source: string, params: { name: string; value: string }[],
     return { ok: false, reason: `the script returned no rows for the recorded input(s)${run.log.length ? ` — log: ${run.log.slice(-5).join(' | ')}` : ''}` };
   }
   const columns = [...new Set(run.rows.flatMap((r) => Object.keys(r)))];
-  const missing = marks.filter((m) => !run.rows.some((r) => [...leaves(r)].some(({ value }) => markMatches(value, m))));
+  const missing = marks.filter((m) => !run.rows.some((r) => objectHasMark(r, m)));
   if (marks.length) {
     if (missing.length === marks.length) {
       return {
@@ -484,7 +484,7 @@ async function setColumns(
     return { reason: `no record has a value at ${empty.map((c) => `"${c.path}"`).join(', ')}. Fields of the first record: ${Object.keys(rows[0] as object).join(', ')}` };
   }
   const projected = rows.map((r) => Object.fromEntries(cols.map((c) => [c.name, resolvePath(r, c.path)])));
-  const missing = marks.filter((m) => !projected.some((r) => [...leaves(r)].some(({ value }) => markMatches(value, m))));
+  const missing = marks.filter((m) => !projected.some((r) => objectHasMark(r, m)));
   if (missing.length) return { reason: `the chosen fields drop the operator's marked selection(s) ${missing.map(shortMark).join(', ')}; include the field(s) that carry them` };
   const saved: Spec = {
     ...existing,

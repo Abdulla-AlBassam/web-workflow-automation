@@ -199,11 +199,52 @@ export function markMatches(value: unknown, mark: string): boolean {
   return false;
 }
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// A selection dragged across several cells of one record carries several
+// field values at once ("185693 KEOPS W.L.L With Limited Liability
+// Company"). Split it: every field whose value sits in the marked text as a
+// whole token (3+ letters or digits) is one column, in the order the operator
+// saw them, provided at least two are found and together they cover half the
+// selection. A header row marked by mistake covers nothing and is ignored.
+export function compositeMatches(mark: string, fields: { path: string; value: unknown }[]): { path: string; at: number }[] {
+  const m = markKey(mark);
+  if (m.length < 8) return [];
+  const hits: { path: string; at: number; len: number }[] = [];
+  for (const { path, value } of fields) {
+    if (typeof value !== 'string' && typeof value !== 'number') continue;
+    const v = markKey(String(value));
+    if (v.length < 3) continue;
+    const found = new RegExp(`(^|\\s)${escapeRe(v)}(?=\\s|$)`).exec(m);
+    if (!found) continue;
+    hits.push({ path, at: found.index + found[1].length, len: v.length });
+  }
+  // Longest first; a value nested inside another's span (or the same value
+  // held by two fields) is not a second column.
+  hits.sort((a, b) => b.len - a.len || a.at - b.at);
+  const kept: typeof hits = [];
+  for (const h of hits) {
+    if (kept.some((k) => h.at < k.at + k.len && k.at < h.at + h.len)) continue;
+    kept.push(h);
+  }
+  if (kept.length < 2) return [];
+  const covered = kept.reduce((n, h) => n + h.len, 0);
+  if (covered < m.length * 0.5) return [];
+  return kept.sort((a, b) => a.at - b.at).map(({ path, at }) => ({ path, at }));
+}
+
+// Does a record (or a whole response) carry a marked selection, as one field
+// or split across several?
+export function objectHasMark(obj: unknown, mark: string): boolean {
+  const fields = [...leaves(obj)];
+  if (fields.some(({ value }) => markMatches(value, mark))) return true;
+  return compositeMatches(mark, fields).length > 0;
+}
+
 export function responseHasMark(resBody: string | undefined, mark: string): boolean {
   const parsed = parseBody(resBody);
   if (parsed === undefined || parsed === null || typeof parsed !== 'object') return false;
-  for (const { value } of leaves(parsed)) if (markMatches(value, mark)) return true;
-  return false;
+  return objectHasMark(parsed, mark);
 }
 
 // The same trick as input correlation, one level deeper: a value from call A's

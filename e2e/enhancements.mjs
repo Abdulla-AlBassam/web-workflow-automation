@@ -152,6 +152,30 @@ try {
     Object.keys(markedRun.extracted.records.rows[0]).length === 1,
     markedRun.stoppedReason ?? JSON.stringify(markedRun.extracted?.records?.rows));
 
+  // A selection dragged across several cells of one row picks those columns,
+  // in the order seen; a marked header row is labels, not data, and is
+  // ignored rather than defeating the projection.
+  await api('/api/sessions', { session: 'rowmark', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/rowmark/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'gulf line', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'GET', url: `${MOCK}/api/urlsearch?q=gulf%20line`, status: 200,
+      resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ CR_NO: '20775', BRANCH: '1', NAME_EN: 'Gulf Line Logistics', NAME_AR: 'الخط الخليجي', STATUS: 'DELETED', TYPE: 'WLL' }] }), seq: 3 },
+    { kind: 'action', action: 'mark', text: 'CR No. Commercial Name (EN) Status', seq: 4 },
+    { kind: 'action', action: 'mark', text: '20775-1 Gulf Line Logistics DELETED', seq: 5 },
+    { kind: 'session_stop', seq: 6 },
+  ]});
+  await api('/api/sessions/rowmark/stop', {});
+  const rowmarkSpec = await api('/api/sessions/rowmark/spec', {});
+  check('a row-wide selection becomes its cells\' columns, in order; the header mark is ignored',
+    JSON.stringify((rowmarkSpec.outcome?.columns ?? []).map((c) => c.path)) === '["CR_NO","NAME_EN","STATUS"]',
+    JSON.stringify(rowmarkSpec.outcome?.columns));
+  const rowmarkRun = await api('/api/sessions/rowmark/run', { params: { cr_name_en: 'isa town' } });
+  check('row-wide selection: runs return exactly those columns',
+    rowmarkRun.ok && JSON.stringify(Object.keys(rowmarkRun.extracted?.records?.rows?.[0] ?? {})) === '["CR_NO","NAME_EN","STATUS"]',
+    rowmarkRun.stoppedReason ?? JSON.stringify(rowmarkRun.extracted?.records?.rows));
+
   // Chained workflow (the wwe.com shape): the search response's CR number
   // feeds a detail call, and the marked bio lives in the detail response.
   const awalBio = 'Awal Trading opened its first Manama storefront in 1978 and now supplies building materials across the Northern Governorate.';

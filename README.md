@@ -116,8 +116,11 @@ npm run backend          # http://127.0.0.1:4823
    labels the session; capture is not limited to it), **Start**.
 2. Perform the workflow once, exactly as a user would. To choose output
    fields, highlight the data you care about and click the **Mark data** chip
-   that appears; a drag across a whole block marks its container, which
-   generalises better than a single line.
+   that appears. In a results table, drag across the cells of one row you
+   want and those become the columns, in that order; a table's header row
+   is labels, not data, and is ignored. On a page of text, a drag across a
+   whole block marks its container, which generalises better than a single
+   line.
 3. **Stop**. The session page opens itself: analysis and spec generation ran
    automatically, and the page shows the timeline, the identified outcome
    call, and the generated steps with their reasons.
