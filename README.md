@@ -39,8 +39,7 @@ Deterministic correlation, no model in the loop:
 - Which typed value landed in which request, matched exactly in JSON and
   form-encoded bodies, and in URLs in raw, percent- and plus-encoded forms.
   A value hiding inside a composite string field (a query string bundled
-  into one JSON value, as Algolia-style APIs send) is matched as a bounded
-  token, but only when nothing matched it exactly — exact evidence wins.
+  into one JSON value) is matched as a bounded token, but only when nothing matched it exactly: exact evidence wins.
 - Which request produced the outcome: scored by whether it carried an input
   value, succeeded, and returned a record set.
 - Chains: a value from the search response (an id, a slug) found in a later
@@ -153,7 +152,7 @@ verified against the real site.
 
 ## What it cannot do
 
-Honest limits, current as of this version. The pipeline correlates the value
+Current as of this version. The pipeline correlates the value
 you typed against the requests the page made and needs the outcome to come
 back as structured data; every limit below follows from that, or is a policy
 line drawn on purpose.
