@@ -226,6 +226,15 @@ triggered, never automatic. A console on the page shows the loop as it runs:
 what the model is checking, every tool it uses, each script it submits and
 the verdict on it.
 
+In plain terms: the tool first tries to work out the automation on its own,
+with no model involved. When it cannot, the assistant is given everything
+the tool saw during the recording and a small set of ways to look further,
+and it writes a short program for that one session. The tool then runs that
+program with the value you typed during the recording and checks the result
+against what you marked. Only a program that passes is kept, and from then
+on it is what runs for that session. The assistant never changes the tool
+itself, never runs anything unchecked, and never sees or sends credentials.
+
 The division of labour is strict. The model investigates and writes;
 deterministic code decides.
 
