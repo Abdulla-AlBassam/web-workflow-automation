@@ -167,11 +167,20 @@ document.addEventListener('keydown', (e) => {
 window.addEventListener('message', (e: MessageEvent) => {
   if (e.source !== window || e.data?.__wfr !== 'net') return;
   const net = e.data.net as Record<string, unknown>;
-  push({
+  const evt: Evt = {
     kind: 'net', ...net,
     reqBody: scrub(net.reqBody as string | undefined),
     resBody: scrub(net.resBody as string | undefined),
-  });
+  };
+  if (net.reqHeaders && typeof net.reqHeaders === 'object') {
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(net.reqHeaders as Record<string, string>)) {
+      if (/cookie|authorization|x-api-key|bearer/i.test(k)) continue;
+      clean[k] = scrub(String(v)) ?? '';
+    }
+    if (Object.keys(clean).length) evt.reqHeaders = clean; else delete evt.reqHeaders;
+  }
+  push(evt);
 });
 
 function pageEvent() {

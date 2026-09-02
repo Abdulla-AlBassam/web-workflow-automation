@@ -8,6 +8,7 @@ import { analyse } from '../backend/src/analyse.ts';
 import { toSpec } from '../backend/src/generate.ts';
 import { run } from '../runner/src/run.ts';
 import { lintScript } from '../runner/src/script.ts';
+import { sanitise } from '../backend/src/redact.ts';
 
 const MOCK_PORT = 4983; // dedicated port: never collide with an interactive mock or backend
 const MOCK = `http://127.0.0.1:${MOCK_PORT}`;
@@ -118,6 +119,31 @@ try {
     lintScript(`async function run(ctx) { const bank = ctx.inputs.query; return [{ bank }]; }`, { query: 'bank' }).length === 0);
   check('lint: a script that ignores the input is rejected',
     /never reads inputs\.query/.test(lintScript('async function run(ctx) { return [{ a: 1 }]; }', { query: 'bank' }).join(' ')));
+
+  // 9. Recorded request headers: the page's own headers travel into the
+  // spec, credential-shaped and browser-managed ones never do, and the
+  // backend scrubs a credential inside reqHeaders even if the extension
+  // let it through.
+  const headered = { ...baseTrace, events: baseTrace.events.map((e) => e.kind === 'net'
+    ? { ...e, reqHeaders: { 'x-app-id': 'demo-app', 'Accept': 'application/vnd.demo+json', 'content-type': 'application/json', authorization: 'Bearer leaked', cookie: 'a=b', origin: 'https://x' } }
+    : e) };
+  const hSpec = toSpec(analyse(headered), { name: 'h', origin: MOCK, loadUrl: `${MOCK}/`, probeStatus: 200 });
+  const hHeaders = hSpec.steps.at(-1).headers;
+  check('headers: recorded custom header and accept carried into the spec, lowercased',
+    hHeaders['x-app-id'] === 'demo-app' && hHeaders.accept === 'application/vnd.demo+json' && hHeaders['content-type'] === 'application/json',
+    JSON.stringify(hHeaders));
+  check('headers: credential-shaped and browser-managed names are never carried',
+    !('authorization' in hHeaders) && !('cookie' in hHeaders) && !('origin' in hHeaders), JSON.stringify(hHeaders));
+  check('headers: a spec without recorded headers keeps the defaults',
+    spec.steps.at(-1).headers.accept === '*/*' && spec.steps.at(-1).headers['content-type'] === 'application/json; charset=utf-8',
+    JSON.stringify(spec.steps.at(-1).headers));
+  const scrubbed = sanitise({ kind: 'net', url: `${MOCK}/api`, reqHeaders: { Authorization: 'Bearer x', 'X-App-Id': 'demo' } }, []);
+  check('headers: backend sanitiser drops a credential inside reqHeaders',
+    JSON.stringify(scrubbed.reqHeaders) === '{"x-app-id":"demo"}', JSON.stringify(scrubbed));
+  const empty = sanitise({ kind: 'net', url: `${MOCK}/api`, reqHeaders: { cookie: 'a=b' } }, []);
+  check('headers: only-credential headers leave no reqHeaders at all', !('reqHeaders' in empty), JSON.stringify(empty));
+  const hRun = await run(hSpec, { [pname]: '84121' }, { readToken: noToken });
+  check('headers: replay with recorded headers still validates against the mock', hRun.ok, hRun.stoppedReason);
 } finally {
   mock.kill();
 }

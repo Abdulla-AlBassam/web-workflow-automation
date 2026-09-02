@@ -28,6 +28,9 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
       "method": "POST",
       "url": "https://api.sijilat.bh/api/CRdetails/AdvanceSearchCR_Paging",
       "headers": { "content-type": "application/json; charset=utf-8", "accept": "*/*" },
+                                        // the headers the page itself set on the recorded call (an app id,
+                                        // a vendor accept), lowercased; credential-shaped and browser-managed
+                                        // names are never recorded, so never here
       "bearerFrom": "token",            // inject Authorization from the token step
       "bodyTemplate": { /* recorded request body with correlated values replaced by {{query}} */ }
     },
@@ -81,6 +84,7 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
 ## Rules
 
 - **Direct requests first.** A step is `type: "request"` unless the outcome genuinely cannot be reached without a browser. Browser steps (`browser-token`, later `browser-action`) carry a `reason`.
+- **Headers are the page's own.** A request step sends the headers the page's code set on the recorded call, minus anything credential-shaped (`cookie`, `authorization`, `x-api-key`) or browser-managed (`origin`, `referer`, `user-agent`). `accept` defaults to `*/*` and `content-type` to the body's shape only when the page set neither. The auth probe sends the same set, so the probe classifies exactly the request the spec will make.
 - **Parameters are correlated, not guessed.** A parameter exists because the Analyse stage found the operator's typed value inside the outcome request (body or URL); one parameter per distinct value.
 - **Chains are correlated too.** A `link` step exists because a value from the previous step's response appeared in the later request's URL, with positive evidence (a marked value in the later response, or a recorded click leading to it). The runner re-resolves the link from the fresh response on every run.
 - **Columns come from marks.** The operator's highlighted text is located in the outcome response at generate time; the spec stores paths, so a new input yields the same fields for its own data. Matching compares letters and digits only (reference markers, pronunciation glyphs and punctuation are ignored), accepts any shared 80-character stretch of a long selection, prefers an exact field over a containing one, and a field inside the record set over one elsewhere.

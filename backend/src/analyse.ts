@@ -19,6 +19,10 @@ export type Call = {
   seq: number;
   reqBody?: string;
   resBody?: string;
+  // Request headers the page's own code set (credential-shaped names already
+  // removed at capture and by the backend). A replay must send them: an API
+  // that expects an app id or a custom accept header answers 4xx without.
+  reqHeaders?: Record<string, string>;
   matches: Match[];      // input values found inside this request
   resultShape?: string;  // short description of the response payload when structured
   resTruncated?: number; // full response length when the recorder cut the body
@@ -354,6 +358,7 @@ export function analyse(trace: Trace): Analysis {
         url: e.url as string, method: (e.method as string) ?? 'GET', status: (e.status as number) ?? 0,
         seq: (e.seq as number) ?? 0,
         reqBody: e.reqBody as string, resBody: e.resBody as string,
+        ...(e.reqHeaders && typeof e.reqHeaders === 'object' ? { reqHeaders: e.reqHeaders as Record<string, string> } : {}),
         ...(typeof e.resTruncated === 'number' ? { resTruncated: e.resTruncated } : {}),
         matches, resultShape: shape, outcomeScore,
       };

@@ -47,6 +47,23 @@ function bodyToString(body: unknown): string | undefined {
   return String(body);
 }
 
+// The headers the page's own code set on the request, lowercased. Browser-
+// managed ones (host, origin, user-agent, cookie) never appear on a Request
+// object and are not settable on an XHR, so what is captured is exactly what
+// a replay must send. Credential-shaped names are dropped here, and again by
+// the recorder and the backend.
+const CREDENTIAL_HEADER = /cookie|authorization|x-api-key|bearer/i;
+
+function headersOf(entries: Iterable<[string, string]>): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const [k, v] of entries) {
+    const key = k.toLowerCase();
+    if (CREDENTIAL_HEADER.test(key)) continue;
+    out[key] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 function emit(net: Record<string, unknown>) {
   window.postMessage({ __wfr: 'net', net }, '*');
 }
@@ -56,7 +73,9 @@ window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
   const req = new Request(input as RequestInfo, init);
   const record = on && allowed(req.url);
   let reqBody: string | undefined;
+  let reqHeaders: Record<string, string> | undefined;
   if (record) {
+    reqHeaders = headersOf(req.headers.entries());
     reqBody = bodyToString(init?.body);
     if (reqBody === undefined && req.method !== 'GET' && req.method !== 'HEAD') {
       try { reqBody = await req.clone().text(); } catch { /* opaque body */ }
@@ -72,6 +91,7 @@ window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
     emit({
       api: 'fetch', method: req.method, url: req.url, status: res.status,
       contentType: res.headers.get('content-type'),
+      ...(reqHeaders ? { reqHeaders } : {}),
       reqBody: rq.body, resBody: rs.body,
       ...(rq.total ? { reqTruncated: rq.total } : {}), ...(rs.total ? { resTruncated: rs.total } : {}),
       started, ended: Date.now(),
@@ -82,10 +102,16 @@ window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
 
 const origOpen = XMLHttpRequest.prototype.open;
 const origSend = XMLHttpRequest.prototype.send;
+const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
 
 XMLHttpRequest.prototype.open = function (method: string, url: string | URL, ...rest: unknown[]) {
-  (this as any).__wfr = { method, url: String(url) };
+  (this as any).__wfr = { method, url: String(url), headers: [] as [string, string][] };
   return (origOpen as any).apply(this, [method, url, ...rest]);
+};
+
+XMLHttpRequest.prototype.setRequestHeader = function (name: string, value: string) {
+  (this as any).__wfr?.headers?.push([name, value]);
+  return origSetHeader.call(this, name, value);
 };
 
 XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
@@ -93,6 +119,7 @@ XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyIn
   if (info && on && allowed(info.url)) {
     info.started = Date.now();
     info.reqBody = bodyToString(body);
+    const reqHeaders = headersOf(info.headers as [string, string][]);
     this.addEventListener('loadend', () => {
       let resBody: string | undefined;
       try {
@@ -103,6 +130,7 @@ XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyIn
       emit({
         api: 'xhr', method: info.method, url: new URL(info.url, location.href).href,
         status: this.status, contentType: this.getResponseHeader('content-type'),
+        ...(reqHeaders ? { reqHeaders } : {}),
         reqBody: rq.body, resBody: rs.body,
         ...(rq.total ? { reqTruncated: rq.total } : {}), ...(rs.total ? { resTruncated: rs.total } : {}),
         started: info.started, ended: Date.now(),

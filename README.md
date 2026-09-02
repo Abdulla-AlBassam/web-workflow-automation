@@ -23,11 +23,12 @@ Record, analyse, generate, execute.
 
 Record (`extension/`, `backend/`). An MV3 Chrome extension captures typed
 values, clicks, navigations, text the operator highlights, and every
-fetch/XHR request the page makes with its request and response bodies,
-whatever host it goes to. Bodies are kept up to 2 MB; a longer one is cut
-and the cut is declared. Cookies, `Authorization` headers and password
-values are stripped in the extension and again in the backend. Events
-stream to a local Fastify backend as they happen.
+fetch/XHR request the page makes with its request and response bodies and
+the request headers the page's own code set, whatever host it goes to.
+Bodies are kept up to 2 MB; a longer one is cut and the cut is declared.
+Cookies, `Authorization` headers and password values are stripped in the
+extension and again in the backend. Events stream to a local Fastify
+backend as they happen.
 
 Analyse (`backend/src/analyse.ts`). Deterministic, no model. Each typed
 value is searched for in every request: JSON and form bodies, URLs in raw,
@@ -95,6 +96,9 @@ on the real site.
   replayed.
 - Value inside a composite string field (Algolia-style `params`).
 - Anonymous token required by the API. Live: Sijilat.
+- Custom request headers the page set (an app id, a vendor `accept`).
+  They are replayed, and the auth probe sends them too, so a 403 caused by
+  a missing header is never mistaken for a missing bearer. Suite only.
 - Forms with several fields: one parameter each.
 - Two-step lookups, search then detail, re-resolved per input. Live:
   wwe.com.
@@ -211,8 +215,9 @@ site changes, the script fails with a reason and the button is there again.
   instructions, is shown in full, and is saved only after it reproduced the
   recording.
 - Every run is started by a person. Stopping a recording sends one
-  request on its own: the recorded outcome call, replayed without
-  credentials, so the generator learns whether a token step is needed.
+  request on its own: the recorded outcome call, replayed with the page's
+  own headers but without credentials, so the generator learns whether a
+  token step is needed.
   Test suites use local fixtures only.
 - The one authenticated call in the Sijilat demonstration uses the
   anonymous token the site issues to every visitor. The runner reads it; it
@@ -233,7 +238,7 @@ docs/        Spec format, site evidence, UI rules
 npm run e2e                # record to replay in real Chromium (stop the backend first)
 npm run test:failures      # every named stop
 npm run test:enhancements  # pagination, bulk, URL specs, chains, marks
-npm run test:matrix        # seven site shapes recorded end to end in real Chromium
+npm run test:matrix        # eight site shapes recorded end to end in real Chromium
 npm run test:repair        # repair loop against a scripted mock model
 npm run typecheck
 ```

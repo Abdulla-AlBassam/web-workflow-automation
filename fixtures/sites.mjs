@@ -1,4 +1,4 @@
-// Scenario-matrix fixture: one server, seven mini-sites, each mimicking a
+// Scenario-matrix fixture: one server, eight mini-sites, each mimicking a
 // distinct real-world site shape the analyser must handle (or refuse). Used by
 // e2e/matrix.e2e.mjs; never exposed beyond localhost.
 import { createServer } from 'node:http';
@@ -161,6 +161,28 @@ createServer(async (req, res) => {
     const all = byName(body.q);
     const pg = Math.max(1, Number(body.page) || 1);
     return json(res, { total: all.length, items: all.slice((pg - 1) * 3, pg * 3) });
+  }
+
+  // 8. Header-gated API: the page sends a public app id in a custom header
+  // and the API answers 403 without it. Not a credential (it sits in the
+  // page's own script), but a replay that drops it would be misread as a
+  // missing bearer.
+  if (p === '/headered/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('App-Id Search', searchUI(`async () => {
+      const r = await fetch('/headered/api/search', { method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-app-id': 'demo-app', 'accept': 'application/vnd.demo+json' },
+        body: JSON.stringify({ q: q.value }) });
+      render((await r.json()).rows);
+    }`)));
+  }
+  if (p === '/headered/api/search' && req.method === 'POST') {
+    if (req.headers['x-app-id'] !== 'demo-app' || req.headers.accept !== 'application/vnd.demo+json') {
+      res.writeHead(403, { 'content-type': 'application/json' });
+      return res.end('{"error":"missing app id"}');
+    }
+    const rows = byName(JSON.parse(await readBody(req)).q);
+    return json(res, { total: rows.length, rows });
   }
 
   res.writeHead(404).end();
