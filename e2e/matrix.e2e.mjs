@@ -1,7 +1,7 @@
 // Scenario-matrix acceptance suite: real Chromium + the built extension
-// recording against seven mini-sites (fixtures/sites.mjs), each a distinct
+// recording against eight mini-sites (fixtures/sites.mjs), each a distinct
 // real-world shape — composite-string APIs, form posts, Arabic data, token
-// gates, server-rendered pages, awkward values, pagination. Positive
+// gates, header gates, server-rendered pages, awkward values, pagination. Positive
 // scenarios must record, generate and replay; negative ones must refuse with
 // a reason. Run: npm run test:matrix (needs ports 4823 and 4985 free).
 import { chromium } from 'playwright';
@@ -190,6 +190,21 @@ try {
     pgRun.ok && pgRun.extracted?.records?.count === 8 &&
     pgRun.steps?.some((s) => s.type === 'pagination'),
     pgRun.stoppedReason ?? `count=${pgRun.extracted?.records?.count}`);
+  // 9. Header-gated API: the page set a custom header and its own accept;
+  // the recorder keeps them, the probe sends them (so the 403 without them is
+  // never misread as a missing bearer), and the spec replays them.
+  await record('/headered/', 'mx-headered', (p) => search(p, 'gulf gum'));
+  const hdSpec = await api('/api/sessions/mx-headered/spec', {});
+  const hdStep = hdSpec.steps?.at(-1);
+  check('headered: no token step is added for a header-caused 403',
+    hdSpec.steps?.every((s) => s.type === 'request'), JSON.stringify(hdSpec.steps?.map((s) => s.type)));
+  check('headered: the recorded custom header and accept are in the spec',
+    hdStep?.headers?.['x-app-id'] === 'demo-app' && hdStep?.headers?.accept === 'application/vnd.demo+json',
+    JSON.stringify(hdStep?.headers));
+  const hdRun = await api('/api/sessions/mx-headered/run', { params: { query: 'smith' } });
+  check('headered: replay sends the headers and returns rows',
+    hdRun.ok && hdRun.extracted?.records?.rows?.[0]?.name === 'Smith + Jones Ltd',
+    hdRun.stoppedReason ?? JSON.stringify(hdRun.extracted?.records?.rows));
 } catch (err) {
   check('harness ran to completion', false, String(err?.stack ?? err).slice(0, 400));
 } finally {

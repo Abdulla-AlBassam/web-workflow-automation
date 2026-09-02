@@ -122,7 +122,9 @@ function overview(events: Record<string, unknown>[], a: Analysis): string {
       const preview = candidates.has(Number(e.seq)) ? CANDIDATE_BODY : OVERVIEW_BODY;
       const flag = candidates.has(Number(e.seq)) ? ' [carries the typed value]' : '';
       const req = e.reqBody ? ` reqBody(${String(e.reqBody).length} chars): ${String(e.reqBody).slice(0, 200)}` : '';
-      lines.push(`${seq} net ${e.method} ${e.url} → ${e.status} ${e.contentType ?? ''}${flag}${cut}${req}`);
+      const hdr = e.reqHeaders && typeof e.reqHeaders === 'object'
+        ? ` reqHeaders ${JSON.stringify(e.reqHeaders).slice(0, 300)}` : '';
+      lines.push(`${seq} net ${e.method} ${e.url} → ${e.status} ${e.contentType ?? ''}${flag}${cut}${hdr}${req}`);
       lines.push(`     resBody(${body.length} chars)${parsed !== undefined ? ` shape ${shapeOf(parsed).slice(0, 600)}` : ''}: ${body.slice(0, preview).replace(/\s+/g, ' ')}${body.length > preview ? '…' : ''}`);
     } else if (kind === 'action') {
       const t = e.target as { selector?: string; text?: string; tag?: string; href?: string } | undefined;

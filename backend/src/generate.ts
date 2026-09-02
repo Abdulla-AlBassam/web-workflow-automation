@@ -1,8 +1,9 @@
 import { compositeMatches, embeddedTokenRegex, leaves, markKey, markMatches, objectHasMark, type Analysis, type Call, type Match } from './analyse.js';
+import { requestHeaders } from './probe.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 13;
+export const SPEC_VERSION = 14;
 
 export type Spec = {
   version: number;
@@ -284,12 +285,9 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     type: 'request',
     method: outcome.method,
     url,
-    headers: {
-      accept: '*/*',
-      ...(bodyTemplate !== undefined
-        ? { 'content-type': formBody ? 'application/x-www-form-urlencoded' : 'application/json; charset=utf-8' }
-        : {}),
-    },
+    // The headers the page itself sent, so the replay is the request the
+    // recording saw (and the probe classified), not a bare one.
+    headers: requestHeaders(outcome.reqHeaders, outcome.reqBody, formBody),
     ...(needsAuth ? { bearerFrom: 'token' } : {}),
     ...(bodyTemplate !== undefined ? { bodyTemplate } : {}),
   });
@@ -308,10 +306,7 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
       type: 'request',
       method: chain.call.method,
       url: chain.call.url.split(chain.linkToken).join('{{link}}'),
-      headers: {
-        accept: '*/*',
-        ...(detailBody !== undefined ? { 'content-type': 'application/json; charset=utf-8' } : {}),
-      },
+      headers: requestHeaders(chain.call.reqHeaders, chain.call.reqBody),
       ...(needsAuth ? { bearerFrom: 'token' } : {}),
       ...(detailBody !== undefined ? { bodyTemplate: detailBody } : {}),
       link: {
