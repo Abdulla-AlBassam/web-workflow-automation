@@ -4,6 +4,7 @@
 // mismatch — it never reports a failed run as a success.
 import { leaves, norm } from '../../backend/src/analyse.js';
 import type { Spec, Step } from '../../backend/src/generate.js';
+import type { ScriptResult } from './script.js';
 
 export type RunResult = {
   ok: boolean;
@@ -15,6 +16,10 @@ export type RunResult = {
 
 type TokenReader = (loadUrl: string) => Promise<{ bearer: string; source: string } | undefined>;
 type PageExtractor = (url: string, selectors: string[]) => Promise<{ httpStatus: number; texts: (string | undefined)[] }>;
+// Session scripts are read from wherever the spec lives (the session folder,
+// or next to a spec file on the CLI); the caller binds that location.
+type ScriptRunner = (file: string, inputs: Record<string, string>, hosts: string[]) => Promise<ScriptResult>;
+export type RunDeps = { readToken: TokenReader; extractPage: PageExtractor; runScript?: ScriptRunner };
 
 type Link = { fromStep: string; rowsPath?: string; path: string; pick: 'best-match'; encoded: boolean };
 
@@ -105,7 +110,7 @@ function followLink(
   return { url: url.split('{{link}}').join(sub), note: ` (followed ${link.path}=${String(linkVal).slice(0, 40)})` };
 }
 
-export async function run(spec: Spec, params: Record<string, string>, deps: { readToken: TokenReader; extractPage: PageExtractor }): Promise<RunResult> {
+export async function run(spec: Spec, params: Record<string, string>, deps: RunDeps): Promise<RunResult> {
   const steps: RunResult['steps'] = [];
   const bearers: Record<string, string> = {};
 
@@ -129,6 +134,17 @@ export async function run(spec: Spec, params: Record<string, string>, deps: { re
       }
       bearers[step.id] = tok.bearer;
       steps.push({ id: step.id, type: step.type, detail: `token from ${tok.source} (${tok.bearer.length} chars)` });
+    } else if (step.type === 'script') {
+      if (!deps.runScript) return { ok: false, stoppedReason: `script step "${step.id}": no script runner available`, steps };
+      const r = await deps.runScript(step.file, params, step.hosts);
+      if ('error' in r) {
+        return { ok: false, stoppedReason: `script step "${step.id}": ${r.error}`, steps };
+      }
+      const body = { rows: r.rows };
+      responses[step.id] = body;
+      finalResponse = { httpStatus: 200, body };
+      outcomeRequest = undefined;
+      steps.push({ id: step.id, type: step.type, detail: `${r.rows.length} row(s) in ${(r.ms / 1000).toFixed(1)}s via ${r.hosts.join(', ') || 'no network'}` });
     } else if (step.type === 'browser-extract') {
       let linkNote = '';
       let pageUrl = step.url;

@@ -42,6 +42,15 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
       ]
     },
     {
+      "id": "automation",               // a session script, written by the LLM repair assistant
+      "type": "script",                 // runner/src/script.ts executes it in an isolated context
+      "file": "automation.mjs",         // in the session folder; defines async function run(ctx) → rows
+      "reason": "the results are rendered server-side; the script drives the page and reads the list",
+      "hosts": ["www.example.com"]      // hosts it was verified against; later runs are confined to them
+      // A script spec's outcome is { "extract": { "records": "rows" } }: the
+      // rows the script returns are the result set, no columns projected.
+    },
+    {
       "id": "detail",                   // present only for chained workflows
       "type": "request",
       "method": "GET",

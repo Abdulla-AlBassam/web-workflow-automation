@@ -1,8 +1,11 @@
-// LLM repair loop suite. A scripted mock LLM stands in for the API, and a
-// mini-site reproduces the JSONP failure shape live: suggestions come back as
-// a script call unless the callback parameter is dropped. Proves the loop
-// diagnoses, fails a bad proposal, verifies a good one, saves a named spec,
-// and honours the safety rails. Run: node e2e/repair.e2e.mjs
+// LLM repair loop suite. A scripted mock model stands in for the API (tool
+// calls over the streaming wire format), and a mini-site reproduces the
+// failure shapes live: JSONP suggestions, an article API, a server-rendered
+// results list. Proves the loop investigates with tools, rejects a script
+// that fails the rails, accepts one that reproduces the recording, saves it
+// into the session, replays it for a new input, confines it to its verified
+// hosts, refines a saved automation, and stops at its budget.
+// Run: node e2e/repair.e2e.mjs
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -34,12 +37,7 @@ await ensureFree(BACKEND_PORT);
 await ensureFree(LLM_PORT);
 await ensureFree(SITE_PORT);
 
-// Mini-site: /api/suggest is JSONP when callback= is present, plain JSON
-// otherwise — the exact shape that defeated capture on the Wikipedia portal.
-// /api/article mirrors the MediaWiki query API: a bookkeeping array
-// (normalized/redirects) listed before the page records, records as an array
-// (formatversion 2) or an id-keyed map (format=1), and prop=info dropping
-// the extract.
+// --- mini-site ---------------------------------------------------------------
 const ARTICLES = [
   { pageid: 8569916, ns: 0, title: 'English language', description: 'West Germanic language',
     extract: 'English (pronounced [ˈɪŋɡlɪʃ] ) is a West Germanic language of the Indo-European language family that emerged in early medieval England and has since become a global lingua franca. The language is named after the Angles, one of the Germanic peoples who migrated to Britain.' },
@@ -53,6 +51,7 @@ const COMPANIES = [
 ];
 const site = createServer((req, res) => {
   const url = new URL(req.url, SITE);
+  // JSONP when callback= is present, plain JSON otherwise.
   if (url.pathname === '/api/suggest') {
     const q = (url.searchParams.get('q') ?? '').toLowerCase();
     const cb = url.searchParams.get('callback');
@@ -66,29 +65,23 @@ const site = createServer((req, res) => {
     }
     return;
   }
-  // One record with a map of URLs inside it — the REST summary shape.
-  if (url.pathname.startsWith('/api/summary/')) {
-    const title = decodeURIComponent(url.pathname.slice('/api/summary/'.length)).replace(/_/g, ' ');
-    const page = ARTICLES.find((a) => a.title.toLowerCase() === title.toLowerCase());
-    res.writeHead(page ? 200 : 404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(page
-      ? { type: 'standard', title: page.title, description: page.description, extract: page.extract.replace(/\(pronounced[^)]*\) /, ''),
-          titles: { canonical: page.title.replace(/ /g, '_') },
-          content_urls: { desktop: { page: `${SITE}/wiki/${page.title.replace(/ /g, '_')}` }, mobile: { page: `${SITE}/m/x` } } }
-      : { type: 'not_found' }));
-    return;
-  }
+  // MediaWiki-like: prop=info drops the extract.
   if (url.pathname === '/api/article') {
     const titles = url.searchParams.get('titles') ?? '';
     const page = ARTICLES.find((a) => a.title.toLowerCase() === titles.toLowerCase());
-    const query = {};
-    if (page && titles !== page.title) query[/^[a-z]/.test(titles) ? 'normalized' : 'redirects'] = [{ from: titles, to: page.title }];
     const record = !page ? { ns: 0, title: titles, missing: true }
       : url.searchParams.get('prop') === 'info' ? { pageid: page.pageid, ns: 0, title: page.title }
       : page;
-    query.pages = url.searchParams.get('format') === '1' ? { [String(record.pageid ?? -1)]: record } : [record];
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ batchcomplete: true, query }));
+    res.end(JSON.stringify({ batchcomplete: true, query: { pages: [record] } }));
+    return;
+  }
+  // Server-rendered results: no API behind them at all.
+  if (url.pathname === '/results') {
+    const q = (url.searchParams.get('q') ?? '').toLowerCase();
+    const hits = COMPANIES.filter((c) => c.name.toLowerCase().includes(q));
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`<html><body><h1>Results</h1><ul>${hits.map((c) => `<li class="hit"><span class="n">${c.name}</span> <span class="cr">${c.cr}</span></li>`).join('')}</ul></body></html>`);
     return;
   }
   res.writeHead(200, { 'content-type': 'text/html' });
@@ -96,75 +89,91 @@ const site = createServer((req, res) => {
 });
 site.listen(SITE_PORT);
 
-// Scripted mock LLM: each POST /v1/messages consumes the next reply.
+// --- mock model ---------------------------------------------------------------
+// Each POST /v1/messages consumes the next scripted assistant message and
+// streams it back as SSE, the way the SDK's stream() expects.
 const SUGGEST = `${SITE}/api/suggest`;
 const ARTICLE = `${SITE}/api/article`;
-const wikiCall = (extra = '', rowsPath = 'query.pages') => ({
-  method: 'GET', url: `${ARTICLE}?titles={{query}}&explaintext=1${extra}`, body: null,
-  params: [{ name: 'query', recordedValue: 'english language' }], rowsPath,
-});
+let toolSeq = 0;
+const text = (t) => ({ type: 'text', text: t });
+const tool = (name, input) => ({ type: 'tool_use', id: `toolu_${++toolSeq}`, name, input });
+
+const GOOD_SUGGEST = `async function run(ctx) {
+  const res = await ctx.http.fetch('${SUGGEST}?q=' + encodeURIComponent(ctx.inputs.query));
+  const data = res.json();
+  return data.results.map((r) => ({ name: r.name, cr: r.cr }));
+}`;
+const HARDCODED = GOOD_SUGGEST.replace('encodeURIComponent(ctx.inputs.query)', "'trading'");
+// The wiki recording typed into #searchInput, so that is the parameter's name.
+const ARTICLE_INFO = `async function run(ctx) {
+  const res = await ctx.http.fetch('${ARTICLE}?titles=' + encodeURIComponent(ctx.inputs.searchInput) + '&prop=info');
+  return res.json().query.pages.map((p) => ({ title: p.title }));
+}`;
+const ARTICLE_FULL = `async function run(ctx) {
+  const res = await ctx.http.fetch('${ARTICLE}?titles=' + encodeURIComponent(ctx.inputs.searchInput) + '&explaintext=1');
+  return res.json().query.pages.map((p) => ({ title: p.title, extract: p.extract }));
+}`;
+const SSR_SCRIPT = `async function run(ctx) {
+  const page = await ctx.browser.open('${SITE}/results?q=' + encodeURIComponent(ctx.inputs.query));
+  const rows = await page.eval("[...document.querySelectorAll('li.hit')].map((li) => ({ name: li.querySelector('.n').textContent, cr: li.querySelector('.cr').textContent }))");
+  await page.close();
+  return rows;
+}`;
+const ZERO_PARAM = `async function run(ctx) {
+  const res = await ctx.http.fetch('${SUGGEST}?q=');
+  return res.json().results.map((r) => ({ name: r.name, cr: r.cr }));
+}`;
+
 const scripts = [
-  // jsonp session, round 1: realistic mistake — keeps the callback parameter.
-  { diagnosis: 'The suggestion endpoint is JSONP; its body was never captured by fetch interception.',
-    action: 'propose', title: 'Trading Name Search',
-    call: { method: 'GET', url: `${SUGGEST}?q={{query}}&callback=cb0`, body: null,
-      params: [{ name: 'query', recordedValue: 'trading' }] } },
-  // jsonp session, round 2: drops the callback — plain JSON.
-  { diagnosis: 'Dropping the callback parameter should return plain JSON from the same endpoint.',
-    action: 'propose', title: 'Trading Name Search',
-    call: { method: 'GET', url: `${SUGGEST}?q={{query}}`, body: null,
-      params: [{ name: 'query', recordedValue: 'trading' }] } },
-  // noinput session: honest stop.
-  { diagnosis: 'Nothing was typed during the recording, so there is no input to parameterise.',
-    action: 'stop', advice: 'Re-record and type the search value during the session, then mark the wanted data.' },
-  // offhost session, round 1: tries to leave the allowlist — must be refused locally.
-  { diagnosis: 'Trying an external mirror of the data.',
-    action: 'propose', title: 'External Search',
-    call: { method: 'GET', url: 'https://evil.example.com/api?q={{query}}', body: null,
-      params: [{ name: 'query', recordedValue: 'trading' }] } },
-  // offhost session, round 2: gives up.
-  { diagnosis: 'No allowlisted endpoint returns the data.',
-    action: 'stop', advice: 'Re-record on the allowlisted site.' },
-  // wiki session: one round, the article API with plain-text extracts.
-  { diagnosis: 'The typeahead was JSONP and the article was server-rendered; the article API returns the intro as plain text.',
-    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall() },
-  // wikiold session (refine): same corrected call.
-  { diagnosis: 'The saved automation extracted the normalisation echo instead of the page records.',
-    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall() },
-  // wikifv1 session: records keyed by page id; the model's rows hint is wrong.
-  { diagnosis: 'Same API, default format.',
-    action: 'propose', title: 'Wikipedia Article Lookup (v1)', call: wikiCall('&format=1', 'query.missing') },
-  // wikipart session: round 1 forgets the extract, round 2 adds it.
-  { diagnosis: 'Page info should be enough.',
-    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall('&prop=info') },
-  { diagnosis: 'The intro text needs the extracts prop.',
-    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall() },
-  // wikistop session: round 1 partial, round 2 gives up — the partial is kept.
-  { diagnosis: 'Page info should be enough.',
-    action: 'propose', title: 'Wikipedia Article Lookup', call: wikiCall('&prop=info') },
-  { diagnosis: 'No API returns the intro text.',
-    action: 'stop', advice: 'Re-record marking only the title.' },
-  // wikisum session: a single-record summary response.
-  { diagnosis: 'The summary endpoint returns the title and intro directly.',
-    action: 'propose', title: 'Wikipedia Summary', call: { ...wikiCall('', null), url: `${SITE}/api/summary/{{query}}` } },
-  // jsonp session refined without marks: the model stops, the spec stays.
-  { diagnosis: 'The saved call already returns the clicked result.',
-    action: 'stop', advice: 'Describe what is wrong with the result.' },
+  // --- jsonp: investigate, fail the lint, then succeed.
+  [text('The suggestion request was a script tag; checking whether it answers as JSON.'), tool('probe', { method: 'GET', url: `${SUGGEST}?q=trading&callback=cb0` })],
+  [tool('probe', { method: 'GET', url: `${SUGGEST}?q=trading` })],
+  [text('Writing the script.'), tool('write_script', { source: HARDCODED, title: 'Trading Name Search', summary: 'Calls the suggestion endpoint as plain JSON.' })],
+  [tool('write_script', { source: GOOD_SUGGEST, title: 'Trading Name Search', summary: 'Calls the suggestion endpoint as plain JSON, parameterised on the typed name.' })],
+  // --- wiki: a net_meta read, a partial script, then the full one.
+  [tool('read_body', { seq: 3 })],
+  [tool('write_script', { source: ARTICLE_INFO, title: 'Wikipedia Article Lookup', summary: 'Article API.' })],
+  [tool('write_script', { source: ARTICLE_FULL, title: 'Wikipedia Article Lookup', summary: 'Article API with plain-text extracts.' })],
+  // --- wikiold (refine): straight to the corrected script.
+  [text('The saved script drops the extract.'), tool('write_script', { source: ARTICLE_FULL, title: 'Wikipedia Article Lookup', summary: 'Adds the extract field.' })],
+  // --- ssr: look at the page, then drive the browser from the script.
+  [tool('open_page', { url: `${SITE}/results?q=trading`, read: 'eval', expression: "[...document.querySelectorAll('li.hit')].map((li) => li.textContent)" })],
+  [tool('write_script', { source: SSR_SCRIPT, title: 'Company Results (rendered)', summary: 'Loads the results page and reads the list.' })],
+  // --- zeroparam: nothing typed, one mark.
+  [tool('write_script', { source: ZERO_PARAM, title: 'All Companies', summary: 'Lists every company.' })],
+  // --- giveup: an honest stop.
+  [tool('give_up', { reason: 'The data is only ever rendered as an image.', advice: 'Re-record on a page that lists the results as text.' })],
 ];
+// After the script runs out the model probes forever, two at a time: the
+// loop's own budget must end it.
+const FOREVER = () => [tool('probe', { method: 'GET', url: `${SUGGEST}?q=x` }), tool('probe', { method: 'GET', url: `${SUGGEST}?q=y` })];
+
 const llmRequests = [];
+function sse(res, blocks) {
+  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+  send('message_start', { type: 'message_start', message: { id: 'msg_mock', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+  blocks.forEach((b, index) => {
+    if (b.type === 'text') {
+      send('content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
+      send('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: b.text } });
+    } else {
+      send('content_block_start', { type: 'content_block_start', index, content_block: { type: 'tool_use', id: b.id, name: b.name, input: {} } });
+      send('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(b.input) } });
+    }
+    send('content_block_stop', { type: 'content_block_stop', index });
+  });
+  const stop = blocks.some((b) => b.type === 'tool_use') ? 'tool_use' : 'end_turn';
+  send('message_delta', { type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: 5 } });
+  send('message_stop', { type: 'message_stop' });
+  res.end();
+}
 const llm = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     llmRequests.push(JSON.parse(body));
-    const script = scripts.shift() ?? { diagnosis: 'out of script', action: 'stop', advice: 'none' };
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      id: 'msg_mock', type: 'message', role: 'assistant', model: 'claude-opus-5',
-      content: [{ type: 'text', text: JSON.stringify(script) }],
-      stop_reason: 'end_turn', stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 1 },
-    }));
+    sse(res, scripts.shift() ?? FOREVER());
   });
 });
 llm.listen(LLM_PORT);
@@ -173,13 +182,14 @@ const dataDir = mkdtempSync(join(tmpdir(), 'wfr-repair-'));
 const backend = spawn('npx', ['tsx', 'backend/src/server.ts'], {
   cwd: process.cwd(),
   env: { ...process.env, DATA_DIR: dataDir, PORT: String(BACKEND_PORT),
-    ANTHROPIC_API_KEY: 'test-key', ANTHROPIC_BASE_URL: `http://127.0.0.1:${LLM_PORT}` },
+    ANTHROPIC_API_KEY: 'test-key', ANTHROPIC_BASE_URL: `http://127.0.0.1:${LLM_PORT}`, REPAIR_MODEL: 'claude-sonnet-5' },
   stdio: 'ignore',
 });
 
-// The JSONP failure shape: typed input, script-only suggestion requests, a
+// --- recordings ---------------------------------------------------------------
+// The JSONP failure shape: typed input, script-only suggestion request, a
 // click on a result — no captured structured response anywhere.
-const jsonpEvents = (session) => [
+const jsonpEvents = () => [
   { kind: 'session_start', seq: 0 },
   { kind: 'page', url: `${SITE}/`, lang: 'en', seq: 1 },
   { kind: 'action', action: 'click', target: { tag: 'input', selector: '#q' }, seq: 2 },
@@ -189,10 +199,9 @@ const jsonpEvents = (session) => [
   { kind: 'nav', url: `${SITE}/company/139867`, transition: 'link', seq: 6 },
   { kind: 'session_stop', seq: 7 },
 ];
-
-// The Wikipedia shape: typed input, JSONP typeahead, a click through to a
-// server-rendered article, two marks on it — the title, and an intro
-// paragraph carrying citation markers the API's plain text will not have.
+// The Wikipedia shape: JSONP typeahead, a click through to a server-rendered
+// article, two marks on it — the title, and an intro paragraph carrying
+// citation markers the API's plain text will not have.
 const INTRO_MARK = 'English (pronounced [ˈɪŋɡlɪʃ] ⓘ)[1] is a West Germanic language of the Indo-European language family that emerged in early medieval England and has since become a global lingua franca.[4][5][6] The language is named after the Angles, one of the Germanic peoples who migrated to Britain.';
 const wikiEvents = () => [
   { kind: 'session_start', seq: 0 },
@@ -207,12 +216,27 @@ const wikiEvents = () => [
   { kind: 'action', action: 'mark', text: INTRO_MARK, target: { selector: '#mwAQ' }, seq: 9 },
   { kind: 'session_stop', seq: 10 },
 ];
+// Server-rendered results: the typed value travels only in a navigation.
+const ssrEvents = () => [
+  { kind: 'session_start', seq: 0 },
+  { kind: 'page', url: `${SITE}/search`, lang: 'en', seq: 1 },
+  { kind: 'action', action: 'input', value: 'trading', target: { id: 'q' }, seq: 2 },
+  { kind: 'action', action: 'submit', target: { tag: 'form', selector: 'form' }, seq: 3 },
+  { kind: 'nav', url: `${SITE}/results?q=trading`, transition: 'form_submit', seq: 4 },
+  { kind: 'page', url: `${SITE}/results?q=trading`, lang: 'en', seq: 5 },
+  { kind: 'session_stop', seq: 6 },
+];
 
+async function record(session, events) {
+  await api('/api/sessions', { session, hosts: ['127.0.0.1'], startedAt: 1 });
+  await api(`/api/sessions/${session}/events`, { items: events });
+  return api(`/api/sessions/${session}/stop`, {});
+}
 async function repair(session, body) {
-  const text = await fetch(`${BACKEND}/api/sessions/${session}/repair`, body === undefined ? { method: 'POST' } : {
+  const t = await fetch(`${BACKEND}/api/sessions/${session}/repair`, body === undefined ? { method: 'POST' } : {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   }).then((r) => r.text());
-  return text.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  return t.split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 // Every inline script on a page must parse: a bad escape in a template
 // literal once emitted a raw newline into the page's JavaScript and the
@@ -224,192 +248,143 @@ function scriptsCompile(html) {
   return '';
 }
 const readSpec = (session) => JSON.parse(readFileSync(join(dataDir, session, 'spec.json'), 'utf8'));
-async function recordWiki(session) {
-  await api('/api/sessions', { session, hosts: ['127.0.0.1'], startedAt: 1 });
-  await api(`/api/sessions/${session}/events`, { items: wikiEvents() });
-  return api(`/api/sessions/${session}/stop`, {});
-}
+const readScript = (session) => readFileSync(join(dataDir, session, 'automation.mjs'), 'utf8');
 const kinds = (lines) => lines.map((l) => l.kind);
+const packText = (i) => JSON.stringify(llmRequests[i] ?? {});
 
 try {
   await wait(`${BACKEND}/health`);
 
-  // Scenario 1: JSONP recording repaired in two rounds.
-  await api('/api/sessions', { session: 'jsonp', hosts: ['127.0.0.1'], startedAt: 1 });
-  await api('/api/sessions/jsonp/events', { items: jsonpEvents('jsonp') });
-  const stop = await api('/api/sessions/jsonp/stop', {});
+  // Scenario 1: the JSONP recording — two probes, a rejected script, a kept one.
+  const stop = await record('jsonp', jsonpEvents());
   check('recording refuses deterministically', stop.spec === false);
-
   const lines = await repair('jsonp');
-  check('round 1 fails on the JSONP response', kinds(lines).includes('fail'),
+  check('probes are executed and shown', lines.filter((l) => l.kind === 'tool' && /^probe GET/.test(l.text)).length === 2, JSON.stringify(lines));
+  check('a script carrying the recorded value literally is rejected by lint',
+    lines.some((l) => l.kind === 'fail' && /lint: .*appears literally/.test(l.text)), JSON.stringify(lines));
+  check('the parameterised script is verified and saved',
+    lines.some((l) => l.kind === 'ok' && /rows carry the typed value "trading"/.test(l.text)) && kinds(lines).includes('saved'),
     JSON.stringify(lines));
-  check('round 2 verifies and saves', kinds(lines).includes('ok') && kinds(lines).includes('saved'),
-    JSON.stringify(lines));
-  const okLine = lines.find((l) => l.kind === 'ok');
-  check('verification cites the recorded evidence', /awal trading/i.test(okLine?.text ?? ''), okLine?.text);
-
-  const spec = JSON.parse(readFileSync(join(dataDir, 'jsonp', 'spec.json'), 'utf8'));
-  check('saved spec is marked repaired and parameterised',
-    !!spec.repaired && spec.steps[0].url.includes('{{query}}') && spec.parameters[0]?.name === 'query',
+  check('spend is reported', lines.some((l) => l.kind === 'info' && /Spend this repair/.test(l.text)));
+  const spec = readSpec('jsonp');
+  check('saved spec is a script step confined to the hosts it used',
+    spec.repaired && spec.steps[0].type === 'script' && spec.steps[0].file === 'automation.mjs' &&
+    JSON.stringify(spec.steps[0].hosts) === '["127.0.0.1"]' && spec.parameters[0]?.name === 'query',
     JSON.stringify(spec.steps));
+  check('the script lives in the session folder', readScript('jsonp') === GOOD_SUGGEST);
   const meta = JSON.parse(readFileSync(join(dataDir, 'jsonp', 'meta.json'), 'utf8'));
   check('session titled by the assistant', meta.name === 'Trading Name Search', meta.name);
-
   const run = await api('/api/sessions/jsonp/run', { params: { query: 'gulf' } });
-  check('repaired automation replays a new input',
-    run.ok && JSON.stringify(run.extracted?.records?.rows ?? []).includes('Gulf Line Logistics'),
-    run.stoppedReason ?? JSON.stringify(run.extracted));
-
+  check('the script replays a new input',
+    run.ok && JSON.stringify(run.extracted?.records?.rows ?? []).includes('Gulf Line Logistics') && run.steps[0].type === 'script',
+    run.stoppedReason ?? JSON.stringify(run));
   const page = await fetch(`${BACKEND}/session/jsonp`).then((r) => r.text());
-  check('session page shows the repair provenance', page.includes('Built by the LLM repair assistant'));
+  check('session page shows the provenance and the script',
+    page.includes('Built by the LLM repair assistant') && page.includes('Show the session script') && page.includes('ctx.http.fetch'));
   check('session page scripts parse (spec present)', scriptsCompile(page) === '', scriptsCompile(page));
-  const after = JSON.parse(readFileSync(join(dataDir, 'jsonp', 'spec.json'), 'utf8'));
-  check('repaired spec survives page-load regeneration', !!after.repaired);
+  check('repaired spec survives page-load regeneration', readSpec('jsonp').steps[0].type === 'script');
+  check('the model was shown the uncaptured JSONP request and the tools',
+    packText(0).includes('body not captured') && packText(0).includes('write_script') && packText(0).includes('[carries the typed value]') === false);
+  check('probe results reached the model in full',
+    JSON.stringify(llmRequests[2]).includes('Awal Trading Co. W.L.L') && JSON.stringify(llmRequests[1]).includes('cb0('));
 
-  // Scenario 2: no typed input — the assistant stops with re-record advice.
-  await api('/api/sessions', { session: 'noinput', hosts: ['127.0.0.1'], startedAt: 1 });
-  await api('/api/sessions/noinput/events', { items: [
+  // Scenario 2: the saved script is confined to its verified hosts.
+  writeFileSync(join(dataDir, 'jsonp', 'automation.mjs'), GOOD_SUGGEST.replace('127.0.0.1', 'localhost'));
+  const strayed = await api('/api/sessions/jsonp/run', { params: { query: 'gulf' } });
+  check('a script reaching outside its hosts is stopped',
+    strayed.ok === false && /outside the hosts/.test(strayed.stoppedReason ?? ''), strayed.stoppedReason);
+  writeFileSync(join(dataDir, 'jsonp', 'automation.mjs'), GOOD_SUGGEST);
+
+  // Scenario 3: nothing typed and nothing marked — no model call at all.
+  const before = llmRequests.length;
+  await record('nothing', [
     { kind: 'session_start', seq: 0 },
     { kind: 'page', url: `${SITE}/company/139867`, lang: 'en', seq: 1 },
-    { kind: 'action', action: 'mark', text: 'Awal Trading Co. W.L.L', target: { selector: '#name' }, seq: 2 },
+    { kind: 'action', action: 'click', target: { tag: 'a', text: 'New Homes' }, seq: 2 },
     { kind: 'session_stop', seq: 3 },
-  ]});
-  await api('/api/sessions/noinput/stop', {});
-  const noLines = await repair('noinput');
-  const refusalPage = await fetch(`${BACKEND}/session/noinput`).then((r) => r.text());
-  check('session page scripts parse (refusal card)', scriptsCompile(refusalPage) === '', scriptsCompile(refusalPage));
-  check('no-input recording gets advice, not a spec',
-    kinds(noLines).includes('advice') && !existsSync(join(dataDir, 'noinput', 'spec.json')),
+  ]);
+  const noLines = await repair('nothing');
+  check('nothing to parameterise or verify: advice without spending a call',
+    kinds(noLines).includes('advice') && llmRequests.length === before && !existsSync(join(dataDir, 'nothing', 'spec.json')),
     JSON.stringify(noLines));
+  const refusalPage = await fetch(`${BACKEND}/session/nothing`).then((r) => r.text());
+  check('session page scripts parse (refusal card)', scriptsCompile(refusalPage) === '', scriptsCompile(refusalPage));
 
-  // Scenario 3: a proposal outside the allowlist is refused without a request.
-  await api('/api/sessions', { session: 'offhost', hosts: ['127.0.0.1'], startedAt: 1 });
-  await api('/api/sessions/offhost/events', { items: jsonpEvents('offhost') });
-  await api('/api/sessions/offhost/stop', {});
-  const offLines = await repair('offhost');
-  const offFail = offLines.find((l) => l.kind === 'fail');
-  check('off-allowlist proposal is refused by the rail', /allowlist/.test(offFail?.text ?? ''),
-    JSON.stringify(offLines));
-  check('off-allowlist session ends with advice, no spec',
-    kinds(offLines).includes('advice') && !existsSync(join(dataDir, 'offhost', 'spec.json')));
-
-  // The digest the model received must carry the metadata-only JSONP request.
-  const firstPack = JSON.stringify(llmRequests[0] ?? {});
-  check('model was shown the uncaptured JSONP request', firstPack.includes('body NOT captured'));
-
-  // Scenario 4: marks decide the rows and become the columns. The bookkeeping
-  // array (normalized) is listed first and has one entry, like the records;
-  // evidence must pick the records, and the citation-marked paragraph must
-  // still match the plain-text extract.
-  const wikiStop = await recordWiki('wiki');
-  check('wiki recording refuses deterministically', wikiStop.spec === false);
+  // Scenario 4: marks decide acceptance — a partial script is fed back.
+  await record('wiki', wikiEvents());
   const wikiLines = await repair('wiki');
-  const wikiOk = wikiLines.find((l) => l.kind === 'ok');
-  check('wiki: verified in one round with both marked columns',
-    kinds(wikiLines).includes('saved') && /columns from your marked selections: title, extract/.test(wikiOk?.text ?? ''),
-    JSON.stringify(wikiLines));
-  const wikiSpec = readSpec('wiki');
-  check('wiki: rows are the page records, not the normalisation echo',
-    wikiSpec.outcome.extract.records === 'query.pages', wikiSpec.outcome.extract.records);
-  check('wiki: columns are row-scoped title and extract',
-    JSON.stringify(wikiSpec.outcome.columns) === JSON.stringify([
-      { name: 'title', path: 'title', scope: 'row' }, { name: 'extract', path: 'extract', scope: 'row' }]),
-    JSON.stringify(wikiSpec.outcome.columns));
-  const french = await api('/api/sessions/wiki/run', { params: { query: 'French Language' } });
+  check('read_body on a metadata-only event explains itself',
+    JSON.stringify(llmRequests.at(-1)).includes('no net event with seq 3'), JSON.stringify(llmRequests.at(-1)).slice(0, 300));
+  check('partial marks: fed back with the missing selection',
+    wikiLines.some((l) => l.kind === 'fail' && /1 of 2 marked selections located; missing: "english pronounced/.test(l.text)), JSON.stringify(wikiLines));
+  check('both marks located: saved',
+    wikiLines.some((l) => l.kind === 'ok' && /all 2 marked selection\(s\) located/.test(l.text)) && kinds(wikiLines).includes('saved'), JSON.stringify(wikiLines));
+  const french = await api('/api/sessions/wiki/run', { params: { searchInput: 'French Language' } });
   const frenchRow = french.extracted?.records?.rows?.[0];
-  check('wiki: a new input returns exactly the marked fields',
-    french.ok && french.extracted.records.rows.length === 1 &&
-    JSON.stringify(Object.keys(frenchRow)) === '["title","extract"]' &&
-    frenchRow.title === 'French language' && frenchRow.extract.startsWith('French is a Romance'),
+  check('wiki: a new input returns the script\'s fields',
+    french.ok && JSON.stringify(Object.keys(frenchRow ?? {})) === '["title","extract"]' && frenchRow.extract.startsWith('French is a Romance'),
     french.stoppedReason ?? JSON.stringify(french.extracted));
 
-  // Scenario 5: refine a saved automation whose extraction was wrong (the
-  // very spec the first live repair produced): the run returns nothing
-  // useful, the operator flags it, the loop replaces it.
-  await recordWiki('wikiold');
-  const wrong = {
-    ...wikiSpec, name: 'wikiold', outcome: { fromStep: 'search', expect: { path: '__http_ok', equals: 'true' }, extract: { records: 'query.normalized' } },
-    repaired: { at: '2026-09-01T21:57:22.687Z', model: 'claude-opus-5', diagnosis: 'JSONP typeahead.' },
-  };
-  writeFileSync(join(dataDir, 'wikiold', 'spec.json'), JSON.stringify(wrong));
-  const wrongRun = await api('/api/sessions/wikiold/run', { params: { query: 'French Language' } });
-  check('a records path the response lacks yields no rows, not the whole body',
-    wrongRun.ok && wrongRun.extracted?.records?.count === 0, JSON.stringify(wrongRun.extracted));
-  const lastRun = { params: { query: 'French Language' }, ok: true, rowCount: 0, columns: [] };
+  // Scenario 5: refine a saved automation the operator flagged.
+  await record('wikiold', wikiEvents());
+  writeFileSync(join(dataDir, 'wikiold', 'automation.mjs'), ARTICLE_INFO);
+  writeFileSync(join(dataDir, 'wikiold', 'spec.json'), JSON.stringify({ ...readSpec('wiki'), name: 'wikiold' }));
+  const lastRun = { params: { searchInput: 'French Language' }, ok: true, rowCount: 1, columns: ['title'], firstRow: { title: 'French language' } };
   const refineLines = await repair('wikiold', { feedback: 'I only want the article text', lastRun });
   check('refine: console shows the saved automation and the note',
     refineLines.some((l) => l.kind === 'info' && /Refining the saved automation/.test(l.text)) &&
-    refineLines.some((l) => l.kind === 'info' && /Your note: I only want the article text/.test(l.text)),
-    JSON.stringify(refineLines));
-  check('refine: verified and updated', refineLines.some((l) => l.kind === 'saved' && /Automation updated/.test(l.text)),
-    JSON.stringify(refineLines));
-  const refinePack = llmRequests.map((r) => JSON.stringify(r)).find((r) => r.includes('Mode: REFINE')) ?? '';
-  check('refine: model saw the current automation, the last run and the note',
-    refinePack.includes('query.normalized') && refinePack.includes('0 row(s)') && refinePack.includes('I only want the article text'));
+    refineLines.some((l) => l.kind === 'info' && /Your note: I only want the article text/.test(l.text)), JSON.stringify(refineLines));
+  check('refine: verified and updated', refineLines.some((l) => l.kind === 'saved' && /Automation updated/.test(l.text)), JSON.stringify(refineLines));
+  const refinePack = llmRequests.map((r) => JSON.stringify(r)).find((r) => r.includes('MODE: REFINE')) ?? '';
+  check('refine: model saw the current script, the last run and the note',
+    refinePack.includes('prop=info') && refinePack.includes('1 row(s)') && refinePack.includes('I only want the article text'));
   const refined = readSpec('wikiold');
   check('refine: provenance records the mode and the note',
-    refined.repaired?.mode === 'refine' && refined.repaired?.feedback === 'I only want the article text' &&
-    refined.outcome.columns?.length === 2, JSON.stringify(refined.repaired));
-  const refinedRun = await api('/api/sessions/wikiold/run', { params: { query: 'French Language' } });
-  check('refine: the flagged input now returns the marked fields',
-    refinedRun.ok && refinedRun.extracted?.records?.rows?.[0]?.extract?.startsWith('French is a Romance') &&
-    Object.keys(refinedRun.extracted.records.rows[0]).length === 2,
-    refinedRun.stoppedReason ?? JSON.stringify(refinedRun.extracted));
+    refined.repaired?.mode === 'refine' && refined.repaired?.feedback === 'I only want the article text' && readScript('wikiold') === ARTICLE_FULL,
+    JSON.stringify(refined.repaired));
   const refinedPage = await fetch(`${BACKEND}/session/wikiold`).then((r) => r.text());
   check('refine: session page shows the refinement provenance', refinedPage.includes('Refined by the LLM repair assistant'));
 
-  // Scenario 6: records keyed by id (MediaWiki format=1) are rows too.
-  await recordWiki('wikifv1');
-  const fv1Lines = await repair('wikifv1');
-  check('id-keyed records: verified as rows', fv1Lines.some((l) => l.kind === 'ok' && /1 row\(s\) at query\.pages/.test(l.text)),
-    JSON.stringify(fv1Lines));
-  check('a rows hint the response does not bear out is reported and ignored',
-    fv1Lines.some((l) => l.kind === 'info' && /proposed rows path "query\.missing" is not a list of records; using "query\.pages"/.test(l.text)),
-    JSON.stringify(fv1Lines));
-  const fv1Run = await api('/api/sessions/wikifv1/run', { params: { query: 'french language' } });
-  check('id-keyed records: replay returns the marked fields per record',
-    fv1Run.ok && fv1Run.extracted?.records?.rows?.[0]?.title === 'French language' &&
-    fv1Run.extracted.records.rows[0].extract?.startsWith('French is a Romance'),
-    fv1Run.stoppedReason ?? JSON.stringify(fv1Run.extracted));
+  // Scenario 6: server-rendered results — the script drives the browser.
+  const ssrStop = await record('ssr', ssrEvents());
+  check('server-rendered recording refuses deterministically', ssrStop.spec === false);
+  const ssrLines = await repair('ssr');
+  check('open_page evaluated in the page and reached the model',
+    ssrLines.some((l) => l.kind === 'tool' && /^open_page/.test(l.text)) && JSON.stringify(llmRequests.at(-1)).includes('Awal Trading Co. W.L.L 139867'),
+    JSON.stringify(ssrLines));
+  check('browser script verified and saved', kinds(ssrLines).includes('saved'), JSON.stringify(ssrLines));
+  const ssrRun = await api('/api/sessions/ssr/run', { params: { query: 'gulf' } });
+  check('browser script replays a new input',
+    ssrRun.ok && ssrRun.extracted?.records?.rows?.[0]?.name === 'Gulf Line Logistics' && ssrRun.extracted.records.rows[0].cr === '20775',
+    ssrRun.stoppedReason ?? JSON.stringify(ssrRun));
 
-  // Scenario 7: a response carrying only some marks is fed back; the next
-  // round completes it.
-  await recordWiki('wikipart');
-  const partLines = await repair('wikipart');
-  check('partial marks: round 1 fed back with the missing selection',
-    partLines.some((l) => l.kind === 'ok' && /1 row\(s\) at query\.pages.*columns from your marked selections: title$/.test(l.text)) &&
-    partLines.some((l) => l.kind === 'fail' && /1 of 2 marked selections located; missing: "english pronounced is a west germanic/.test(l.text)),
-    JSON.stringify(partLines));
-  check('partial marks: round 2 completes both columns',
-    partLines.some((l) => l.kind === 'saved') && readSpec('wikipart').outcome.columns?.length === 2);
+  // Scenario 7: nothing typed but something marked — a zero-parameter listing.
+  await record('zeroparam', [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${SITE}/companies`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'mark', text: 'Delmon Trading W.L.L', target: { selector: '#c2' }, seq: 2 },
+    { kind: 'session_stop', seq: 3 },
+  ]);
+  const zeroLines = await repair('zeroparam');
+  check('zero-parameter automation accepted on its mark', kinds(zeroLines).includes('saved') && readSpec('zeroparam').parameters.length === 0, JSON.stringify(zeroLines));
+  const zeroRun = await api('/api/sessions/zeroparam/run', { params: {} });
+  check('zero-parameter automation runs', zeroRun.ok && zeroRun.extracted?.records?.count === 3, zeroRun.stoppedReason ?? JSON.stringify(zeroRun));
 
-  // Scenario 8: the model gives up after a partial hit — the partial is kept.
-  await recordWiki('wikistop');
-  const stopLines = await repair('wikistop');
-  check('partial then stop: best verified attempt kept',
-    stopLines.some((l) => l.kind === 'saved' && /kept the best verified attempt: 1 of 2/.test(l.text)) &&
-    readSpec('wikistop').outcome.columns?.length === 1, JSON.stringify(stopLines));
+  // Scenario 8: an honest give-up leaves no spec.
+  await record('giveup', jsonpEvents());
+  const giveLines = await repair('giveup');
+  check('give_up ends with advice and no spec',
+    giveLines.some((l) => l.kind === 'advice' && /Re-record on a page/.test(l.text)) && !existsSync(join(dataDir, 'giveup', 'spec.json')), JSON.stringify(giveLines));
 
-  // Scenario 9: a single-record response is the record; the URL map inside
-  // it is not the row set.
-  await recordWiki('wikisum');
-  const sumLines = await repair('wikisum');
-  check('single record: verified as one row, no stray rows path',
-    sumLines.some((l) => l.kind === 'ok' && /1 row\(s\), carrying/.test(l.text)) &&
-    JSON.stringify(readSpec('wikisum').outcome.extract) === '{}', JSON.stringify(sumLines));
-  const sumRun = await api('/api/sessions/wikisum/run', { params: { query: 'French language' } });
-  check('single record: replay returns one row with the marked fields',
-    sumRun.ok && sumRun.extracted?.records?.rows?.length === 1 &&
-    JSON.stringify(Object.keys(sumRun.extracted.records.rows[0])) === '["title","extract"]' &&
-    sumRun.extracted.records.rows[0].title === 'French language',
-    sumRun.stoppedReason ?? JSON.stringify(sumRun.extracted));
-
-  // Scenario 10: refining without marks or a better idea leaves the spec alone.
-  const before = readSpec('jsonp');
-  const noBetter = await repair('jsonp', { feedback: 'rows look odd' });
-  check('refine with no better proposal leaves the saved spec unchanged',
-    noBetter.some((l) => l.kind === 'done' && /saved one is unchanged/.test(l.text)) &&
-    JSON.stringify(readSpec('jsonp')) === JSON.stringify(before), JSON.stringify(noBetter));
+  // Scenario 9: a model that never stops investigating hits the budget.
+  await record('loop', jsonpEvents());
+  const loopLines = await repair('loop');
+  check('runaway investigation is ended by the loop budget',
+    loopLines.some((l) => l.kind === 'done' && /No working automation found after 16 turns/.test(l.text)) && !existsSync(join(dataDir, 'loop', 'spec.json')),
+    JSON.stringify(loopLines.slice(-3)));
+  check('tool budget message reached the model, parallel calls counted',
+    JSON.stringify(llmRequests.at(-1)).includes('Tool budget exhausted') && loopLines.filter((l) => l.kind === 'tool').length === 20,
+    String(loopLines.filter((l) => l.kind === 'tool').length));
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

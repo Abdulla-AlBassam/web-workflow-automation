@@ -23,14 +23,19 @@ against wwe.com; the recorder and analysis are site-agnostic.
 ### 1. Record (`extension/` + `backend/`)
 
 An MV3 Chrome extension captures the demonstration: typed values, clicks,
-navigations, text the operator highlights as wanted data, and same-site
-network traffic (request and response bodies included). Events stream to a
-local Fastify backend as they happen.
+navigations, text the operator highlights as wanted data, and every
+fetch/XHR request the page makes, request and response bodies included,
+whatever host it goes to. The data behind a search often lives on a domain
+nobody would think to name (a search-as-a-service host, an API subdomain),
+so nothing is filtered at capture; the analyser ranks calls by whether they
+carry the typed value. Bodies are kept up to 2 MB and a longer one is cut
+with the cut declared, never silently. Events stream to a local Fastify
+backend as they happen.
 
-Capture is allowlisted to the hosts you name when starting the session (the
-popup prefills the current site). Cookies, `Authorization` headers and
-password values are never retained; redaction happens in the extension and is
-enforced again by the backend.
+The host you name when starting the session (the popup prefills the current
+site) identifies the site on the session page. Cookies, `Authorization`
+headers and password values are never retained; redaction happens in the
+extension and is enforced again by the backend.
 
 ### 2. Analyse (`backend/src/analyse.ts`)
 
@@ -152,123 +157,146 @@ verified against the real site.
 
 ## What it cannot do
 
-Current as of this version. The pipeline correlates the value
-you typed against the requests the page made and needs the outcome to come
-back as structured data; every limit below follows from that, or is a policy
-line drawn on purpose.
+Current as of this version. There are two layers. The
+deterministic pipeline correlates the value you typed against the requests
+the page made and needs the outcome to come back as structured data; when
+that fails, the LLM repair assistant (next section) can investigate and
+write a script for the session. The limits below say which layer each
+falls on, and which are policy lines drawn on purpose.
 
-Nothing to correlate:
+The deterministic pipeline refuses, and the assistant usually recovers:
 
-- **No typed value.** A browse-only recording (open a menu, land on a
-  listing, stop) has no parameter, so no automation is derived, even when a
-  structured listing call was captured on the way. Fixed, parameterless
-  listings are not yet promoted.
 - **Values transformed before sending.** A typed date sent as an epoch, a
-  dropdown choice sent as its numeric id, a name sent hashed. Correlation is
-  verbatim (raw, URL-encoded, plus-encoded, or embedded in a composite
-  string); a transformed value never matches and the recording refuses.
-- **Traffic the recorder cannot see.** JSONP script tags, WebSockets and
-  cross-origin iframes are invisible to fetch/XHR interception. The repair
-  assistant can often recover the JSONP case by proposing the plain-JSON form
-  of the same endpoint; it cannot recover WebSockets.
-- **Third-party API hosts** are captured only if added to the allowlist when
-  the recording starts; the popup prefills the current site only.
+  dropdown choice sent as its numeric id. Correlation is verbatim, so the
+  pipeline refuses; a session script can apply the transformation.
+- **JSONP and script-tag traffic.** Invisible to fetch/XHR interception;
+  only the URL is recorded. The assistant probes the plain-JSON form of the
+  same endpoint.
+- **Server-rendered result lists.** HTML results with no API behind them
+  (older sites, Next.js/RSC). The pipeline has no call to promote; a session
+  script can drive a browser page and read the list.
+- **Responses larger than the recorder keeps.** A body over 2 MB is cut and
+  the cut declared; the assistant fetches it in full.
+- **Nothing typed, something marked.** A browse-only recording of a listing
+  has no parameter; the assistant can still derive a zero-parameter
+  automation from the marks.
 
-Nothing structured to extract:
+Nobody can, and the tool says so:
 
-- **Server-rendered result lists.** If the search results themselves are
-  HTML with no API behind them (common on older sites and on Next.js/RSC
-  sites), there is no call to promote and the tool refuses with a note.
-  Marked single pages work (see browser-extract); a generic scraper for
-  repeated HTML list structures is not built.
-- **Non-JSON outcomes.** XML, PDF, CSV downloads and images are not
-  structured in the tool's sense and are refused, as are results computed
-  entirely in page JavaScript with no request behind them.
-
-The replay cannot reproduce the request:
-
-- **Per-request signing, nonces, CSRF tokens and timestamps.** If every
-  request must be individually minted by page JavaScript, a direct call
-  cannot be generated. (Anonymous token minting, as on Sijilat, is a
-  reusable value parked in web storage, not signing, and is handled.)
+- **WebSockets and cross-origin iframes.** Not captured; a script could only
+  guess at them, and guesses are not accepted.
+- **Per-request signing, nonces and CSRF tokens.** If every request must be
+  minted by page JavaScript, no direct call can be generated; a session
+  script that drives the page in a browser may still work, at browser speed.
+  (Anonymous token minting, as on Sijilat, is a reusable value parked in web
+  storage, not signing, and is handled deterministically.)
 - **Logins, CAPTCHAs and bot walls.** Out of scope by design. No credential
   capture, no CAPTCHA bypass, no authenticated areas: cookies and auth
-  headers are never kept, so a cookie-session API replays as 401 and the run
-  stops with that reason. A site behind a Cloudflare challenge will not
-  record usefully.
+  headers are never kept, scripts cannot send them, and a cookie-session API
+  replays as 401. A site behind a Cloudflare challenge will not record
+  usefully.
+- **Non-text outcomes.** PDF, CSV downloads and images are not structured
+  in the tool's sense.
 
 Shape limits of the current build:
 
-- **One-hop chains.** A search response can feed one detail call or one
-  page. A multi-step wizard carrying state between steps is not attempted.
+- **One-hop chains** in the deterministic pipeline: a search response feeds
+  one detail call or one page. A session script may chain further.
 - **URL-borne pagination.** Fetch-all triggers only for a page field carried
   in the request body; `?page=2` in a URL is not yet detected.
 - **Active tab only.** Results that open in a new tab are not recorded.
-- **The repair assistant proposes a single direct call.** Anything that
-  needs a browser step or a token step stays with the deterministic path.
 - **One recording, one workflow.** A new site or a changed workflow needs a
-  fresh recording and a human eye on the generated spec. The tool
+  fresh recording and a human eye on the generated spec or script. The tool
   generalises the method, not any individual automation.
 
-When any of these bite, the failure is explicit: the session page or the run
-says what was expected, what was found, and why it stopped. Interrupted
-recordings are reviewable but never become automations.
+When any of these bite, the failure is explicit: the session page, the
+repair console or the run says what was expected, what was found, and why
+it stopped. Interrupted recordings are reviewable but never become
+automations.
 
 ## When it refuses or gets it wrong: the LLM repair assistant
 
-A recording the deterministic analyser refuses can be handed to an LLM,
-by clicking **Begin LLM repair** on the session page. It is always operator-
+A recording the deterministic analyser refuses can be handed to an LLM by
+clicking **Begin LLM repair** on the session page. It is always operator-
 triggered, never automatic. A console on the page shows the loop as it runs:
-the model's diagnosis, each proposed call, and the result of executing it.
+what the model is checking, every tool it uses, each script it submits and
+the verdict on it.
 
-The division of labour is strict. The model reads a truncated digest of the
-sanitised trace and proposes one direct HTTP call. Deterministic code then
-executes that proposal with the recorded input values and accepts it only if
-the response is structured JSON carrying evidence the operator actually saw
-while recording (marked text, or the result they clicked). A failed attempt
-is fed back to the model for another round, up to four; a verified one is
-saved as a normal spec, the session is titled, and the Run and Bulk panels
-work as usual. Nothing unverified is ever saved, and a repaired spec says so
-on the session page. When no direct call can work, for example nothing was
-typed during the recording, the assistant says so and explains how to
-re-record instead.
+The division of labour is strict. The model investigates and writes;
+deterministic code decides.
 
-What the operator marked is what a run must return. When the recording
-carries marked selections, a proposal is accepted only if its response holds
-them as plain fields: the validator locates each mark in the live response
-(comparing letters and digits only, so reference markers such as `[4]`,
-pronunciation glyphs and punctuation that page text has and API fields do not
-cannot defeat a match, and a long selection matches on any shared stretch),
-picks the record set by that evidence rather than by
-position (the model may say where the records live, and that hint breaks
-ties but never overrules the evidence), and saves the marks as the spec's
-columns. A response carrying only
-some of the marks is fed back to the model with the missing ones named; if
-nothing better turns up, the best verified attempt is kept and the console
-says which marks it lacks.
+The model receives the whole recording (every event, with every captured
+body reachable in full) plus the analyser's verdict, and four tools:
+
+- **read_body** reads any captured request or response body, page by page.
+- **probe** sends one HTTP request and returns the whole response: an API
+  the page called on another host, the JSON form of a JSONP call, a public
+  API it knows for the site, a body the recorder cut.
+- **open_page** loads a URL in a headless browser, optionally fills, clicks
+  and waits, and returns the page's text, an element's HTML, or the result
+  of a JavaScript expression evaluated in the page.
+- **write_script** submits a script for this session.
+
+The script is a small plain-JavaScript program, `async function run(ctx)`,
+that receives the run's parameters and returns rows. It runs in an isolated
+context with exactly two capabilities: send HTTP requests, and drive a
+browser page. No files, no environment, no modules, no credentials. It is
+saved as `automation.mjs` in the session's folder, shown in full on the
+session page, and from then on every run of that session executes it: the
+Run, Bulk and export panels work unchanged.
+
+Acceptance is deterministic and applied to every submission:
+
+1. Lint: the script reads every parameter from `ctx.inputs`, carries none of
+   the recorded values as a literal, and imports nothing.
+2. It is executed with the recorded inputs and must return rows within 90
+   seconds.
+3. If the operator marked text, each marked selection must appear as a
+   field value in some row (letters and digits compared, so reference
+   markers such as `[4]` and punctuation cannot defeat a match). A partial
+   match is fed back with the missing selections named; if nothing better
+   turns up, the best verified attempt is kept and the console says which
+   marks it lacks.
+4. If nothing was marked, some row must carry the typed value or the text
+   of a result the operator clicked.
+
+The hosts the accepted script contacted are recorded in the spec, and every
+later run is confined to them: a script that reaches elsewhere is stopped
+with that reason. Nothing unverified is ever saved, and a repaired session
+says so on its page. When no automation is possible, the assistant gives up
+with concrete advice on how to re-record. A recording with nothing typed and
+nothing marked is refused before any model call, because there is nothing to
+parameterise and nothing to verify against.
 
 The same loop refines a saved automation. After any run, the session page
 offers **Fix with LLM** with an optional note. The assistant receives the
-current automation, what the last run returned (row count, columns, first
-row) and the note; without a note it compares the marked selections with the
-result itself. A verified replacement is saved over the old spec and the
+current automation (the script itself, when there is one), what the last run
+returned and the note; without a note it compares the marked selections with
+the result itself. A verified replacement is saved over the old one and the
 provenance line on the page says it was refined, quoting the note. A failed
 attempt leaves the saved automation untouched.
 
-Guard rails on every proposal: hosts limited to the recording's allowlist,
-GET and POST only, no custom headers, no credentials, one validation request
-per round. To enable the assistant, put `ANTHROPIC_API_KEY=...` in a `.env`
-file at the project root (gitignored) and restart the backend; without a key
-the button explains what is missing. Note that using it sends the trace
-digest to the Anthropic API, the only part of the tool that leaves the
-machine.
+Budget rails, enforced in code: at most 16 model turns, 20 tool calls and 6
+script attempts per repair, plus a token ceiling; the console reports the
+estimated spend at the end. The default model is `claude-sonnet-5`;
+`REPAIR_MODEL` in `.env` selects another. To enable the assistant, put
+`ANTHROPIC_API_KEY=...` in a `.env` file at the project root (gitignored)
+and restart the backend; without a key the button explains what is missing.
+Using it sends the sanitised recording to the Anthropic API, the only part
+of the tool that leaves the machine.
 
 ## Safeguards
 
-- Network capture is allowlisted per session; third-party traffic is dropped
-  at capture, not at export.
 - Cookies, auth headers and password values are never stored. Redaction is
-  two-layer (extension, then backend) and asserted by the e2e suite.
+  two-layer (extension, then backend) and asserted by the e2e suite. Every
+  fetch/XHR the page makes is captured, whatever the host; third-party
+  bodies stay on the machine like everything else.
+- Session scripts run in an isolated context with two capabilities (HTTP
+  without credentials, a browser page), are confined to the hosts they were
+  verified against, and are shown in full on the session page. This is
+  isolation against accidents, not a hardened sandbox: the code comes from
+  the assistant under the tool's instructions and is saved only after it
+  reproduced the recording.
 - Live-site use is low-volume and operator-initiated; every automated run is
   started by a person. Test suites run only against local fixtures.
 - The one authenticated call in the Sijilat demonstration uses the anonymous
@@ -293,6 +321,6 @@ npm run e2e                # full record→replay path in real Chromium (backend
 npm run test:failures      # every named stop: interrupted, missing param, changed outcome, absent token
 npm run test:enhancements  # pagination, bulk, URL specs, chains, extraction
 npm run test:matrix        # scenario matrix: seven site shapes recorded end to end in real Chromium
-npm run test:repair        # LLM repair loop against a scripted mock model and a live JSONP mini-site
+npm run test:repair        # LLM repair loop against a scripted mock model: probes, browser, session scripts, rails, budget
 npm run typecheck
 ```

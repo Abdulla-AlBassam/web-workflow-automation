@@ -136,7 +136,7 @@ function timelineRow(e: Record<string, unknown>): string {
   return `<li><span>${tag}</span><span class="body">${body}</span></li>`;
 }
 
-export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record<string, unknown>[], spec: any | undefined): string {
+export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record<string, unknown>[], spec: any | undefined, script?: string): string {
   // The operator's story, not the raw stream: keep actions, navigation, the
   // outcome calls (search, and the chained detail when present) and lifecycle
   // markers; drop the dropdown-population noise.
@@ -162,12 +162,12 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
     <td class="sub">${esc(c.resultShape ?? '')}</td>
   </tr>`).join('');
 
-  const specCard = spec ? renderSpec(spec, meta.session, a.marks.length) : `<div class="card"><h2>Automation</h2>
+  const specCard = spec ? renderSpec(spec, meta.session, a.marks.length, script) : `<div class="card"><h2>Automation</h2>
     <p class="note">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p>
     ${st === 'complete' ? `
     <div class="runrow" style="margin-top:12px">
       <button id="repair-btn" class="btn">Begin LLM repair</button>
-      <span class="sub">An LLM reviews the recording and proposes a fix; the fix is executed and verified against the recording's own evidence before anything is saved.</span>
+      <span class="sub">An LLM investigates the recording (full captured bodies, probes of the site, pages in a browser) and writes a script for this session. The script is executed with your recorded input and must return what you marked before it is saved.</span>
     </div>
     <div id="repair-console" class="repair-console" hidden></div>
     <div id="repair-after"></div>` : ''}
@@ -182,7 +182,7 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
       con.hidden = false;
       con.innerHTML = '';
       after.innerHTML = '';
-      const GLYPH = { info: '· ', llm: '\u2234 ', try: '\u2192 ', fail: '\u2717 ', ok: '\u2713 ', saved: '\u2713 ', advice: '\u261e ', error: '\u2717 ', done: '· ' };
+      const GLYPH = { info: '· ', llm: '\u2234 ', tool: '\u2699 ', try: '\u2192 ', fail: '\u2717 ', ok: '\u2713 ', saved: '\u2713 ', advice: '\u261e ', error: '\u2717 ', done: '· ' };
       const line = (kind, text) => {
         const d = document.createElement('div');
         d.className = 'rc-' + kind;
@@ -303,10 +303,11 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
     </script>`);
 }
 
-function renderSpec(spec: any, session: string, marksCount = 0): string {
+function renderSpec(spec: any, session: string, marksCount = 0, script?: string): string {
   const flow = spec.steps.map((s: any) =>
-    `<span class="step step-${s.type.startsWith('browser-') ? 'token' : 'request'}">${esc(s.id)}<span class="sub"> · ${esc(s.type)}</span></span>`
+    `<span class="step step-${s.type === 'request' ? 'request' : 'token'}">${esc(s.id)}<span class="sub"> · ${esc(s.type)}</span></span>`
   ).join('<span class="arrow">→</span>');
+  const scriptStep = spec.steps.find((s: any) => s.type === 'script');
   const reasoned = spec.steps.filter((s: any) => s.reason);
   const inputs = spec.parameters.map((p: any) =>
     `<label>${esc(p.name)}<input id="param-${esc(p.name)}" value="${esc(p.example)}" spellcheck="false" autocomplete="off"></label>`
@@ -315,10 +316,14 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
   return `<div class="card">
     <h2>Generated automation <span class="sub">— best way to reach the outcome</span></h2>
     ${spec.repaired?.mode === 'refine'
-      ? `<p class="ok-note" style="margin:0 0 12px">Refined by the LLM repair assistant (${esc(spec.repaired.model)}) after a run was flagged${spec.repaired.feedback ? ` ("${esc(spec.repaired.feedback)}")` : ''}: ${esc(spec.repaired.diagnosis)} Verified by executing it against the recording's own evidence before saving.</p>`
+      ? `<p class="ok-note" style="margin:0 0 12px">Refined by the LLM repair assistant (${esc(spec.repaired.model)}) after a run was flagged${spec.repaired.feedback ? ` ("${esc(spec.repaired.feedback)}")` : ''}: ${esc(spec.repaired.diagnosis)} Verified by executing it with the recorded input against the recording's own evidence before saving.</p>`
       : spec.repaired
-        ? `<p class="ok-note" style="margin:0 0 12px">Built by the LLM repair assistant (${esc(spec.repaired.model)}) after the deterministic analyser refused: ${esc(spec.repaired.diagnosis)} Verified by executing it against the recording's own evidence before saving.</p>`
+        ? `<p class="ok-note" style="margin:0 0 12px">Built by the LLM repair assistant (${esc(spec.repaired.model)}) after the deterministic analyser refused: ${esc(spec.repaired.diagnosis)} Verified by executing it with the recorded input against the recording's own evidence before saving.</p>`
         : ''}
+    ${scriptStep
+      ? `<p class="sub" style="margin:0 0 8px">This session runs its own script (<span class="mono">${esc(scriptStep.file)}</span>), confined to ${scriptStep.hosts?.length ? scriptStep.hosts.map((h: string) => `<span class="mono">${esc(h)}</span>`).join(', ') : 'no network'}. It receives the parameters below and returns the rows.</p>
+    <details class="spec-json"><summary>Show the session script</summary><pre>${esc(script ?? '(script file missing)')}</pre></details>`
+      : ''}
     <div class="flow">${flow}</div>
     ${reasoned.length
       ? reasoned.map((s: any) => `<p class="note">${esc(s.reason)}</p>`).join('')
@@ -344,7 +349,7 @@ function renderSpec(spec: any, session: string, marksCount = 0): string {
     <div id="fix-block" class="fix-block" hidden>
       <p class="sub" style="margin-bottom:8px">Not what you wanted? Describe the problem, or leave this blank: the assistant compares what you marked while recording with what this run returned.</p>
       <textarea id="fix-text" rows="2" placeholder="e.g. I only want the article text, not the other fields"></textarea>
-      <div class="runrow" style="margin-top:8px"><button id="fix-btn" class="btn">Fix with LLM</button><span class="sub">Every proposal is executed and verified against your recording before anything is saved.</span></div>
+      <div class="runrow" style="margin-top:8px"><button id="fix-btn" class="btn">Fix with LLM</button><span class="sub">The assistant investigates and writes a script for this session; it is executed and verified against your recording before anything is saved.</span></div>
       <div id="fix-console" class="repair-console" hidden></div>
       <div id="fix-after"></div>
     </div>

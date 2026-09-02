@@ -22,7 +22,10 @@ function scrub(s: string | undefined): string | undefined {
 function push(evt: Evt) {
   if (!on) return;
   buffer.push({ ...evt, t: Date.now() });
-  if (buffer.length >= 20) flush();
+  // A large captured body travels alone, so one batch never grows past what
+  // the worker and the backend accept in a single message.
+  const big = typeof evt.resBody === 'string' && evt.resBody.length > 200 * 1024;
+  if (buffer.length >= 20 || big) flush();
   else if (flushTimer === undefined) flushTimer = window.setTimeout(flush, 250);
 }
 

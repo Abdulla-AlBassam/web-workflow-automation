@@ -27,7 +27,7 @@ export type Spec = {
   // deterministic generator. Such specs are never auto-regenerated: the
   // generator would only refuse again. Mode "refine" means the loop replaced
   // an automation whose runs the operator flagged, with their note if given.
-  repaired?: { at: string; model: string; diagnosis: string; mode?: 'repair' | 'refine'; feedback?: string };
+  repaired?: { at: string; model: string; diagnosis: string; mode?: 'repair' | 'refine'; feedback?: string; summary?: string };
 };
 
 export type Column = { name: string; path: string; scope: 'row' | 'body' };
@@ -36,6 +36,10 @@ export type Step =
   // The token itself is discovered at run time from the site's web storage;
   // the spec records only where to load from and why the step exists.
   | { id: string; type: 'browser-token'; loadUrl: string; reason: string }
+  // A session script written by the LLM repair assistant for this recording
+  // alone (see runner/src/script.ts): `file` sits in the session folder,
+  // `hosts` is the list it was verified against and is confined to.
+  | { id: string; type: 'script'; file: string; reason: string; hosts: string[] }
   // Server-rendered outcome: a browser loads the linked page and reads the
   // operator-marked elements. Carries a reason like every browser step.
   | { id: string; type: 'browser-extract'; url: string; reason: string;

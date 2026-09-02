@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { existsSync, readFileSync } from 'node:fs';
-import { appendEvents, createSession, getMeta, getSpec, listSessions, readEvents, saveMeta, saveSpec, status } from './store.js';
+import { appendEvents, createSession, getMeta, getScript, getSpec, listSessions, readEvents, saveMeta, saveSpec, status } from './store.js';
 import { repairSession } from './repair.js';
 
 // Local secrets (ANTHROPIC_API_KEY for the repair assistant) live in the
@@ -20,8 +20,11 @@ import { renderDetail, renderList } from './views.js';
 import { run } from '../../runner/src/run.js';
 import { readBearerViaBrowser, type Bearer } from '../../runner/src/browser-token.js';
 import { extractPageViaBrowser } from '../../runner/src/browser-extract.js';
+import { runScript } from '../../runner/src/script.js';
 
-const app = Fastify({ logger: { level: 'warn' } });
+// Captured bodies travel in event batches: a large JSON response must not be
+// refused at the door.
+const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 64 * 1024 * 1024 });
 
 app.get('/health', async () => ({ ok: true }));
 
@@ -198,7 +201,15 @@ app.post('/api/sessions/:id/run', async (req, reply) => {
   const spec = (await freshSpec(id)) as Parameters<typeof run>[0] | undefined;
   if (!spec) return reply.code(404).send({ error: 'no spec for this session' });
   const { params } = (req.body ?? {}) as { params?: Record<string, string> };
-  return run(spec, params ?? {}, { readToken: cachedReadToken, extractPage: extractPageViaBrowser });
+  return run(spec, params ?? {}, {
+    readToken: cachedReadToken,
+    extractPage: extractPageViaBrowser,
+    runScript: async (file, inputs, hosts) => {
+      const source = getScript(id, file);
+      if (source === undefined) return { error: `session script ${file} is missing`, hosts: [], log: [] };
+      return runScript(source, { inputs, hosts });
+    },
+  });
 });
 
 app.get('/', async (_req, reply) => {
@@ -213,7 +224,9 @@ app.get('/session/:id', async (req, reply) => {
   const events = readEvents(id);
   const a = analyse({ meta: { session: id, status: status(meta) }, events });
   reply.type('text/html');
-  return renderDetail(meta, status(meta), a, events, await freshSpec(id));
+  const spec = await freshSpec(id) as { steps?: { type: string; file?: string }[] } | undefined;
+  const scriptStep = spec?.steps?.find((s) => s.type === 'script');
+  return renderDetail(meta, status(meta), a, events, spec, scriptStep?.file ? getScript(id, scriptStep.file) : undefined);
 });
 
 const port = Number(process.env.PORT ?? 4823);

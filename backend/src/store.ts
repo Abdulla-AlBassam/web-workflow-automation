@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export type Meta = {
@@ -18,6 +18,23 @@ const dir = (session: string) => join(DATA_DIR, session);
 const metaPath = (session: string) => join(dir(session), 'meta.json');
 const eventsPath = (session: string) => join(dir(session), 'events.jsonl');
 const specPath = (session: string) => join(dir(session), 'spec.json');
+
+// Session scripts (runner/src/script.ts) live beside the spec that names them.
+export const SCRIPT_FILE = 'automation.mjs';
+
+export function saveScript(session: string, file: string, source: string) {
+  writeFileSync(join(dir(session), file), source);
+}
+
+export function getScript(session: string, file: string): string | undefined {
+  const p = join(dir(session), file);
+  return existsSync(p) ? readFileSync(p, 'utf8') : undefined;
+}
+
+export function deleteScript(session: string, file: string) {
+  const p = join(dir(session), file);
+  if (existsSync(p)) unlinkSync(p);
+}
 
 export function saveSpec(session: string, spec: unknown) {
   writeFileSync(specPath(session), JSON.stringify(spec, null, 2));

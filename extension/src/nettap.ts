@@ -1,31 +1,36 @@
 // Runs in the page's MAIN world: the only place response bodies are readable.
 // Emits captured calls to the isolated recorder via postMessage; touches no chrome APIs.
+//
+// Every fetch/XHR the page makes is captured, whatever host it goes to: the
+// data behind a search often lives on a different domain from the page (a
+// search-as-a-service host, an API subdomain nobody allowlisted). Ranking by
+// the typed value, downstream, separates the outcome call from the noise.
 
-const REQ_CAP = 64 * 1024;
-const RES_CAP = 256 * 1024;
+const REQ_CAP = 256 * 1024;
+const RES_CAP = 2 * 1024 * 1024;
 
 let on = false;
-let hosts: string[] = [];
 
 window.addEventListener('message', (e: MessageEvent) => {
   if (e.source === window && e.data?.__wfr === 'state') {
     on = !!e.data.on;
-    hosts = Array.isArray(e.data.hosts) ? e.data.hosts : [];
   }
 });
 
 function allowed(url: string): boolean {
   try {
-    const h = new URL(url, location.href).hostname;
-    return hosts.some((a) => h === a || h.endsWith('.' + a));
+    const u = new URL(url, location.href);
+    return u.protocol === 'http:' || u.protocol === 'https:';
   } catch {
     return false;
   }
 }
 
-function cap(s: string | undefined, limit: number): string | undefined {
-  if (s === undefined) return undefined;
-  return s.length > limit ? s.slice(0, limit) + `…[truncated ${s.length} chars]` : s;
+// A body over the cap is cut, and the cut is declared: the event carries the
+// full length so nothing downstream mistakes a cut body for the whole thing.
+function cap(s: string | undefined, limit: number): { body: string | undefined; total?: number } {
+  if (s === undefined) return { body: undefined };
+  return s.length > limit ? { body: s.slice(0, limit), total: s.length } : { body: s };
 }
 
 function bodyToString(body: unknown): string | undefined {
@@ -62,10 +67,13 @@ window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
   if (record) {
     let resBody: string | undefined;
     try { resBody = await res.clone().text(); } catch { /* stream already locked */ }
+    const rq = cap(reqBody, REQ_CAP);
+    const rs = cap(resBody, RES_CAP);
     emit({
       api: 'fetch', method: req.method, url: req.url, status: res.status,
       contentType: res.headers.get('content-type'),
-      reqBody: cap(reqBody, REQ_CAP), resBody: cap(resBody, RES_CAP),
+      reqBody: rq.body, resBody: rs.body,
+      ...(rq.total ? { reqTruncated: rq.total } : {}), ...(rs.total ? { resTruncated: rs.total } : {}),
       started, ended: Date.now(),
     });
   }
@@ -90,10 +98,13 @@ XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyIn
       try {
         if (this.responseType === '' || this.responseType === 'text') resBody = this.responseText;
       } catch { /* responseType forbids text access */ }
+      const rq = cap(info.reqBody, REQ_CAP);
+      const rs = cap(resBody, RES_CAP);
       emit({
         api: 'xhr', method: info.method, url: new URL(info.url, location.href).href,
         status: this.status, contentType: this.getResponseHeader('content-type'),
-        reqBody: cap(info.reqBody, REQ_CAP), resBody: cap(resBody, RES_CAP),
+        reqBody: rq.body, resBody: rs.body,
+        ...(rq.total ? { reqTruncated: rq.total } : {}), ...(rs.total ? { resTruncated: rs.total } : {}),
         started: info.started, ended: Date.now(),
       });
     });

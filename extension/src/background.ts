@@ -131,13 +131,15 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
 });
 
 // Metadata-only net evidence: covers traffic the MAIN-world tap cannot see
-// (main-frame form posts, redirects). Bodies come from the tap alone.
+// (main-frame form posts, redirects, script tags). Bodies come from the tap
+// alone. Any host qualifies; static assets are dropped as noise.
+const ASSET_TYPES = new Set(['image', 'font', 'stylesheet', 'media', 'ping', 'csp_report']);
 chrome.webRequest.onCompleted.addListener(
   (details) => {
     (async () => {
       const state = await getState();
       if (!state.on || details.tabId !== state.tabId) return;
-      if (!allowed(details.url, state.hosts)) return;
+      if (ASSET_TYPES.has(details.type)) return;
       if (details.type === 'xmlhttprequest') return; // tap already captured it with bodies
       await deliver([{
         kind: 'net_meta', t: Date.now(), method: details.method, url: details.url,

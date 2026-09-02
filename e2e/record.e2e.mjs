@@ -134,7 +134,9 @@ try {
   check('password never leaves the page', !raw.includes(PIN));
   check('password field recorded as [REDACTED]', events.some(
     (e) => e.kind === 'action' && e.action === 'input' && e.target?.id === 'secret' && e.value === '[REDACTED]'));
-  check('cross-host noise dropped', !raw.includes('/noise'));
+  // Every host is captured now: the data behind a search often lives on a
+  // domain nobody allowlisted. Ranking, not filtering, separates the noise.
+  check('cross-host call captured with its body', events.some((e) => e.kind === 'net' && e.url.includes('/noise') && e.resBody?.includes('noise')));
 
   const seqs = events.map((e) => e.seq);
   check('seq strictly increasing, no gaps',

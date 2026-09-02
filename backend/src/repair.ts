@@ -1,15 +1,18 @@
-// LLM repair loop: when a recording refuses to generate an automation, or a
-// saved automation returns something other than what the operator marked, an
-// operator-triggered assistant reviews the sanitised trace, proposes one
-// direct call, and the proposal is executed against the recording's own
-// evidence before anything is saved. The LLM proposes; deterministic code
-// validates and assembles the spec. Nothing unverified ever becomes a spec.
+// LLM repair loop. When a recording refuses to generate an automation, or a
+// saved automation returns something other than what the operator marked,
+// an operator-triggered assistant investigates the recording with tools —
+// read any captured body in full, probe the site, open pages in a browser —
+// and writes a small script for THIS session (runner/src/script.ts). The
+// script is executed with the recorded inputs and must reproduce what the
+// operator marked or saw before it is saved; from then on every run of the
+// session executes that script. The LLM investigates and writes;
+// deterministic code decides. Nothing unverified ever becomes a spec.
 import Anthropic from '@anthropic-ai/sdk';
-import { analyse, leaves, markKey, markMatches, norm, type Analysis } from './analyse.js';
-import { SPEC_VERSION, locateColumns, missingMarks, type Column, type Spec } from './generate.js';
-import { hostAllowed } from './redact.js';
-import { getMeta, getSpec, readEvents, saveMeta, saveSpec, status, type Meta } from './store.js';
+import { analyse, leaves, markKey, markMatches, type Analysis } from './analyse.js';
+import { SPEC_VERSION, type Spec } from './generate.js';
+import { SCRIPT_FILE, getMeta, getScript, getSpec, readEvents, saveMeta, saveScript, saveSpec, status } from './store.js';
 import { UA } from '../../runner/src/browser-token.js';
+import { browserSession, lintScript, runScript, type ScriptOk } from '../../runner/src/script.js';
 
 export type Emit = (kind: string, text: string) => void;
 
@@ -17,90 +20,142 @@ export type Emit = (kind: string, text: string) => void;
 // page saw it, and the operator's note on what was wrong with it.
 export type RepairInput = { feedback?: string; lastRun?: unknown };
 
-const MODEL = process.env.REPAIR_MODEL ?? 'claude-opus-5';
-const MAX_ROUNDS = 4;
-const BODY_SNIPPET = 400;
+export const MODEL = process.env.REPAIR_MODEL ?? 'claude-sonnet-5';
 
-type Proposal = {
-  diagnosis: string;
-  action: 'propose' | 'stop';
-  advice?: string;
-  title?: string;
-  call?: {
-    method: string;
-    url: string;
-    body?: unknown;
-    params: { name: string; recordedValue: string }[];
-    rowsPath?: string | null;
-  };
+// Budget rails, all enforced here: the loop ends when any is reached.
+const MAX_TURNS = 16;            // model calls
+const MAX_TOOL_CALLS = 20;       // tool executions across the loop
+const MAX_INPUT_TOKENS = 900_000; // cumulative, cache reads included
+const MAX_SCRIPT_TRIES = 6;
+
+const PAGE_CHARS = 12_000;       // one read_body page
+const OVERVIEW_BODY = 240;       // body preview per net event in the overview
+const CANDIDATE_BODY = 1_500;    // preview for calls carrying the typed value
+const OVERVIEW_EVENTS = 400;
+
+// Public list prices per million tokens, for the spend line at the end.
+const PRICE: Record<string, { in: number; out: number }> = {
+  'claude-sonnet-5': { in: 2, out: 10 },
+  'claude-opus-5': { in: 5, out: 25 },
+  'claude-haiku-4-5': { in: 1, out: 5 },
 };
 
-const SYSTEM = `You are the repair assistant inside a local web-workflow automation tool. An operator recorded themselves demonstrating a workflow in a browser. Either the deterministic analyser could not generate an automation from the recording, or it did and the automation's result was not what the operator wanted. Diagnose why, and when possible propose ONE direct HTTP call that reaches the same outcome, parameterised on the operator's typed input.
+const SYSTEM = `You are the repair assistant inside a local web-workflow automation tool. An operator recorded themselves demonstrating a workflow in a browser: typing a value, clicking, sometimes highlighting ("marking") the text they want every run to return. A deterministic analyser tries to turn the recording into an automation on its own. You are called when it could not, or when the automation it produced returned the wrong thing.
 
-The runner can execute: a single HTTP GET or POST to a URL that may contain {{param}} placeholders (URL-encoded at run time), with an optional JSON object body whose string values may contain {{param}}. No custom headers, no cookies, no authentication. Your proposal is validated by actually executing it with the recorded input values; it is accepted only if the response is structured JSON carrying the evidence the operator saw.
+Your job: work out how the outcome the operator demonstrated can be reached again for ANY input value, then write a script that does it for this session. Investigate first, then write; do not guess when a tool can tell you.
 
-Rules:
-- The URL host MUST belong to the recording's allowlisted hosts.
-- Prefer endpoints visible in the recording. Metadata-only requests (whose bodies were not captured) are prime candidates: a JSONP request (resourceType "script", callback= parameter) usually becomes plain JSON when the callback parameter is dropped.
-- When the operator marked text while recording, that text is what every run must return. The proposal is accepted only if the response carries each marked selection in a plain field (columns are located by matching the marked text against field values), so ask for plain text rather than HTML where the API offers the choice, and request the fields the marks need.
-- In REFINE mode the session already has an automation, but its result did not match the marked selections or the operator's note. Diagnose the mismatch and propose the corrected call; the same endpoint with different parameters is fine.
-- Name where the result records live in the response (rowsPath) when you know the API: it is checked against the actual response and used only if the evidence agrees. A response that is one record, not a list, has rowsPath null.
-- If no direct call can work from this evidence (nothing was typed, or the outcome exists only in server-rendered HTML with no API), use action "stop" with concrete advice on how to re-record so the deterministic pipeline succeeds.
+TOOLS
+- read_body: read a captured request or response body in full, page by page (the overview shows only previews). Pass seq for a recorded event, or probe for a probe result.
+- probe: send one HTTP request and see the full response. Use it to test an endpoint you suspect (an API the page called on another host, a JSON variant of a JSONP call, a documented public API for the site), and to re-fetch bodies the recorder cut.
+- open_page: load a URL in a headless browser, optionally act on it (fill, click, press, wait), and read its text, an element's HTML, or the result of a JavaScript expression evaluated in the page. Use it when results are rendered server-side or built by page scripts with no plain API.
+- write_script: submit the script. It is linted, executed with the recorded inputs, and accepted only if it reproduces the recording (see ACCEPTANCE). On failure you get the reason and can submit again.
+- give_up: when no automation is possible from this recording; say what the operator should do differently when re-recording.
 
-Reply with ONLY a JSON object, no prose, no code fences:
-{
-  "diagnosis": "one or two plain sentences on why the recording failed",
-  "action": "propose" | "stop",
-  "advice": "only when stopping: how to re-record",
-  "title": "short human name for the automation, e.g. 'Wikipedia Article Search'",
-  "call": {
-    "method": "GET" | "POST",
-    "url": "https://host/path?q={{query}}",
-    "body": null,
-    "params": [{ "name": "query", "recordedValue": "the value the operator typed" }],
-    "rowsPath": "query.results" | null
+THE SCRIPT
+Plain JavaScript (no import, require, process, eval). Define:
+  async function run(ctx) { ... return rows; }
+ctx.inputs   — the run's parameters, e.g. ctx.inputs.query (names given below). Read every parameter from here; never hard-code the recorded value.
+ctx.http.fetch(url, { method, headers, body }) → { status, ok, url, contentType, text, json() }. body may be an object (sent as JSON) or a string. Cookie/authorization headers are dropped.
+ctx.browser.open(url) → page. page.goto(url), fill(selector, text), click(selector), press(selector, key), waitFor(selector, ms) → boolean, wait(ms), text(selector?) → string, texts(selector) → string[], html(selector?) → string, attr(selector, name), eval(expression) → JSON value evaluated in the page (e.g. "[...document.querySelectorAll('.row')].map(r => ({ name: r.querySelector('.n')?.textContent }))"), url(), close().
+ctx.log(...)  — notes shown to the operator on failure. ctx.sleep(ms).
+Return an array of flat row objects — one row per result, plain string/number fields, named as a person would name columns. Prefer a direct API call over driving the browser; use the browser only when no request returns the data.
+
+ACCEPTANCE (deterministic, applied to every submission)
+1. Lint: reads every ctx.inputs.<name>; contains no recorded value as a literal; no imports.
+2. Executed with the recorded inputs within 90 seconds, returning at least one row.
+3. If the operator marked text: each marked selection must appear as a field value in some row (plain text; citation markers and whitespace are ignored). Ask APIs for plain text rather than HTML. A partial match is reported so you can add the missing field.
+4. If nothing was marked: some row must carry the typed value, or the text of a result the operator clicked.
+Hosts the accepted script contacted are recorded; later runs are confined to them.
+
+STYLE
+Be brief in prose: one or two sentences before a tool call, stating what you are checking. Prefer endpoints seen in the recording; prefer the smallest response that carries the marked data (no polygons, no HTML when text is available). Never send credentials. When done, write_script; when impossible, give_up with concrete re-recording advice.`;
+
+// --- trace overview -------------------------------------------------------
+
+// A compact description of a JSON value: keys with types, arrays with length
+// and the shape of their first element. Cheap to read, enough to plan a call.
+function shapeOf(v: unknown, depth = 0): string {
+  if (depth > 3) return '…';
+  if (Array.isArray(v)) return v.length ? `[${v.length} × ${shapeOf(v[0], depth + 1)}]` : '[]';
+  if (v && typeof v === 'object') {
+    const entries = Object.entries(v);
+    const inner = entries.slice(0, 14).map(([k, x]) => `${k}: ${shapeOf(x, depth + 1)}`).join(', ');
+    return `{${inner}${entries.length > 14 ? `, …${entries.length - 14} more` : ''}}`;
   }
-}`;
+  if (typeof v === 'string') return `"${v.length > 40 ? v.slice(0, 40) + '…' : v}"`;
+  return String(v);
+}
 
-// The LLM sees a digest, never the raw trace: every event kind, but bodies
-// truncated hard and asset noise dropped. The trace is already sanitised at
-// capture; this pass only shrinks it.
-function digest(events: Record<string, unknown>[]): string {
+function tryJson(s: unknown): unknown {
+  if (typeof s !== 'string') return undefined;
+  try { return JSON.parse(s); } catch { return undefined; }
+}
+
+function overview(events: Record<string, unknown>[], a: Analysis): string {
+  const candidates = new Set(a.calls.filter((c) => c.matches.length).map((c) => c.seq));
   const lines: string[] = [];
   for (const e of events) {
-    if (lines.length >= 150) { lines.push('… (digest capped at 150 events)'); break; }
+    if (lines.length >= OVERVIEW_EVENTS) { lines.push(`… (${events.length - OVERVIEW_EVENTS} more events not listed; read_body still reaches them by seq)`); break; }
+    const seq = `#${e.seq ?? '?'}`;
     const kind = String(e.kind);
     if (kind === 'net_meta') {
       const rt = String(e.resourceType ?? '');
-      if (/image|stylesheet|font|media/.test(rt)) continue;
-      lines.push(`net_meta ${e.method} ${e.url} → ${e.status} (${rt}; body NOT captured)`);
+      if (/image|stylesheet|font|media|ping/.test(rt)) continue;
+      lines.push(`${seq} net_meta ${e.method} ${e.url} → ${e.status} (${rt}; body not captured — a script tag is JSONP or a page script)`);
     } else if (kind === 'net') {
-      const body = String(e.resBody ?? '').slice(0, BODY_SNIPPET);
-      lines.push(`net ${e.method} ${e.url} → ${e.status} ${e.contentType ?? ''} body: ${body}`);
+      const body = String(e.resBody ?? '');
+      const parsed = tryJson(body);
+      const cut = typeof e.resTruncated === 'number' ? ` CUT by the recorder at ${body.length} of ${e.resTruncated} chars (probe the URL for the full body)` : '';
+      const preview = candidates.has(Number(e.seq)) ? CANDIDATE_BODY : OVERVIEW_BODY;
+      const flag = candidates.has(Number(e.seq)) ? ' [carries the typed value]' : '';
+      const req = e.reqBody ? ` reqBody(${String(e.reqBody).length} chars): ${String(e.reqBody).slice(0, 200)}` : '';
+      lines.push(`${seq} net ${e.method} ${e.url} → ${e.status} ${e.contentType ?? ''}${flag}${cut}${req}`);
+      lines.push(`     resBody(${body.length} chars)${parsed !== undefined ? ` shape ${shapeOf(parsed).slice(0, 600)}` : ''}: ${body.slice(0, preview).replace(/\s+/g, ' ')}${body.length > preview ? '…' : ''}`);
     } else if (kind === 'action') {
-      const t = e.target as { selector?: string; text?: string } | undefined;
-      const text = t?.text ? ` text="${String(t.text).slice(0, 80)}"` : '';
+      const t = e.target as { selector?: string; text?: string; tag?: string; href?: string } | undefined;
+      const text = t?.text ? ` text="${String(t.text).slice(0, 100).replace(/\n/g, ' / ')}"` : '';
       const value = e.value !== undefined ? ` value="${e.value}"` : '';
-      const mark = e.text !== undefined ? ` marked="${String(e.text).slice(0, 80)}"` : '';
-      lines.push(`action ${e.action} ${t?.selector ?? ''}${value}${mark}${text}`);
+      const mark = e.action === 'mark' ? ` marked="${String(e.text ?? '').slice(0, 300)}"` : '';
+      const href = t?.href ? ` href="${t.href}"` : '';
+      lines.push(`${seq} action ${e.action} <${t?.tag ?? '?'}> ${t?.selector ?? ''}${value}${mark}${text}${href}`);
     } else if (kind === 'nav' || kind === 'page') {
-      lines.push(`${kind} ${e.url}`);
+      lines.push(`${seq} ${kind} ${e.url}${e.title ? ` "${String(e.title).slice(0, 80)}"` : ''}`);
     } else {
-      lines.push(kind);
+      lines.push(`${seq} ${kind}`);
     }
   }
   return lines.join('\n');
 }
 
-// Strings the operator demonstrably saw: typed values, marked text, the text
-// of things clicked after typing. A valid outcome response must carry one.
+// Parameter names for the typed inputs, one per distinct value; field names
+// that look like search fields keep their name, the rest become "query".
+function paramNames(a: Analysis): { name: string; value: string; field: string }[] {
+  const out: { name: string; value: string; field: string }[] = [];
+  const used = new Set<string>();
+  for (const i of a.inputs) {
+    if (out.some((o) => o.value === i.value)) continue;
+    // Same rule as the generator, so a script and a deterministic spec name
+    // the same parameter for the same field.
+    const base = (/name|cr_|query|search|term/i.test(i.field) ? i.field.replace(/[^\w]/g, '_') : 'query').replace(/^(\d)/, '_$1');
+    let name = base;
+    for (let n = 2; used.has(name); n++) name = `${base}_${n}`;
+    used.add(name);
+    out.push({ name, value: i.value, field: i.field });
+  }
+  return out;
+}
+
+// Strings the operator demonstrably saw as results: text of links clicked
+// after the last typed value (never form buttons), plus the marks.
 function evidenceStrings(events: Record<string, unknown>[], a: Analysis): string[] {
   const out = new Set<string>();
   for (const m of a.marks) if (markKey(m)) out.add(markKey(m).slice(0, 60));
+  const lastInput = Math.max(-1, ...events.filter((e) => e.kind === 'action' && e.action === 'input').map((e) => Number(e.seq) || 0));
   for (const e of events) {
-    if (e.kind !== 'action' || e.action !== 'click') continue;
-    const text = (e.target as { text?: string } | undefined)?.text;
-    const n = markKey(String(text ?? '').split('\n')[0]);
+    if (e.kind !== 'action' || e.action !== 'click' || (Number(e.seq) || 0) < lastInput) continue;
+    const t = e.target as { text?: string; tag?: string; type?: string } | undefined;
+    if (!t || t.tag === 'button' || t.tag === 'input' || t.tag === 'select' || t.tag === 'label' || t.tag === 'form') continue;
+    const n = markKey(String(t.text ?? '').split('\n')[0]);
     if (n.length >= 4) out.add(n.slice(0, 60));
   }
   return [...out];
@@ -108,12 +163,14 @@ function evidenceStrings(events: Record<string, unknown>[], a: Analysis): string
 
 const shortMark = (m: string) => `"${markKey(m).slice(0, 60)}"`;
 
-function describeSpec(spec: Spec): string {
+function describeSpec(spec: Spec, script: string | undefined): string {
   const steps = spec.steps.map((s) => s.type === 'request'
     ? `${s.method} ${s.url}${s.bodyTemplate !== undefined ? ` body ${JSON.stringify(s.bodyTemplate).slice(0, 300)}` : ''}`
+    : s.type === 'script' ? `session script (${s.file}, hosts ${s.hosts.join(', ')})`
     : `${s.type} step`).join(' → ');
   const cols = spec.outcome.columns?.map((c) => c.name).join(', ');
-  return `${steps}; rows at ${spec.outcome.extract.records ?? 'the whole response'}; ${cols ? `columns ${cols}` : 'no marked columns'}`;
+  const base = `${steps}; rows at ${spec.outcome.extract.records ?? 'the whole response'}; ${cols ? `columns ${cols}` : 'no marked columns'}`;
+  return script ? `${base}\n--- current script ---\n${script.slice(0, 6000)}\n--- end script ---` : base;
 }
 
 // The page reports the last run in its own words; only its shape is trusted.
@@ -126,178 +183,242 @@ function describeRun(r: unknown): string {
   return `${Number(run.rowCount) || 0} row(s) with columns ${cols}${first}`;
 }
 
-// Locate the result set in a live response: every array of objects (or
-// strings) and every id-keyed map of records is a candidate. The one carrying
-// the most marked selections and evidence wins, then the longest — never the
-// first, or a bookkeeping array listed before the records would take it. The
-// model may name the path; its hint breaks ties but never overrules evidence.
-type Rows = { path: string; rows: unknown[]; note?: string };
-function chooseRows(body: unknown, marks: string[], evidence: string[], hint: string | null | undefined): Rows | undefined {
-  const candidates: { path: string; rows: unknown[] }[] = [];
-  const isRecord = (x: unknown) => !!x && typeof x === 'object' && !Array.isArray(x)
-    && Object.values(x).some((f) => f === null || typeof f !== 'object');
-  const walk = (n: unknown, path: string) => {
-    if (Array.isArray(n)) {
-      if (n.length && n.every((x) => x !== null && (typeof x === 'object' || typeof x === 'string'))) candidates.push({ path, rows: n });
-      return;
-    }
-    if (n && typeof n === 'object') {
-      const values = Object.values(n);
-      if (path && values.length && values.every(isRecord)) candidates.push({ path, rows: values });
-      for (const [k, v] of Object.entries(n)) walk(v, path ? `${path}.${k}` : k);
-    }
-  };
-  walk(body, '');
-  const scored = candidates.map((c) => {
-    const text = markKey(JSON.stringify(c.rows));
-    let score = evidence.filter((ev) => text.includes(ev)).length;
-    for (const m of marks) {
-      if (c.rows.some((r) => [...leaves(r)].some(({ value }) => markMatches(value, m)))) score++;
-    }
-    return { ...c, score };
-  });
-  let best: (typeof scored)[number] | undefined;
-  for (const c of scored) {
-    if (!best || c.score > best.score || (c.score === best.score && c.rows.length > best.rows.length)) best = c;
-  }
-  // Evidence present but inside no candidate: the response is one record
-  // (a summary, a detail) and a stray map of URLs must not pose as its rows.
-  if (best && best.score === 0 && (marks.length || evidence.length)) best = undefined;
-  if (!hint) return best && { path: best.path, rows: best.rows };
-  const hinted = scored.find((c) => c.path === hint);
-  if (hinted && hinted.score >= 1 && hinted.score === best?.score) return { path: hinted.path, rows: hinted.rows };
-  const note = `the proposed rows path "${hint}" ${hinted ? 'carries less of the evidence than' : 'is not a list of records; using'} ${best ? `"${best.path}"` : 'the whole response as one record'}`;
-  return best ? { path: best.path, rows: best.rows, note } : { path: '', rows: [], note };
+// --- acceptance -------------------------------------------------------------
+
+type Verdict =
+  | { ok: true; run: ScriptOk; missing: string[]; columns: string[]; note: string }
+  | { ok: false; reason: string; partial?: { run: ScriptOk; missing: string[]; columns: string[] } };
+
+function rowText(row: unknown): string {
+  return markKey([...leaves(row)].map(({ value }) => (typeof value === 'string' || typeof value === 'number' ? String(value) : '')).join(' '));
 }
 
-function substituteUrl(url: string, values: Record<string, string>): string {
-  return url.replace(/\{\{(\w+)\}\}/g, (_, n) => encodeURIComponent(values[n] ?? ''));
-}
-
-function substituteBody(node: unknown, values: Record<string, string>): unknown {
-  if (Array.isArray(node)) return node.map((v) => substituteBody(v, values));
-  if (node && typeof node === 'object') {
-    return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, substituteBody(v, values)]));
+async function accept(source: string, params: { name: string; value: string }[], marks: string[], evidence: string[]): Promise<Verdict> {
+  const inputs = Object.fromEntries(params.map((p) => [p.name, p.value]));
+  const lint = lintScript(source, inputs);
+  if (lint.length) return { ok: false, reason: `lint: ${lint.join('; ')}` };
+  const run = await runScript(source, { inputs });
+  if ('error' in run) {
+    return { ok: false, reason: `the script failed: ${run.error}${run.log.length ? ` — log: ${run.log.slice(-5).join(' | ')}` : ''}` };
   }
-  if (typeof node === 'string') {
-    const m = node.match(/^\{\{(\w+)\}\}$/);
-    if (m) return values[m[1]] ?? node;
-    return node.replace(/\{\{(\w+)\}\}/g, (_, n) => values[n] ?? `{{${n}}}`);
+  if (!run.rows.length) {
+    return { ok: false, reason: `the script returned no rows for the recorded input(s)${run.log.length ? ` — log: ${run.log.slice(-5).join(' | ')}` : ''}` };
   }
-  return node;
-}
-
-type Verified = { rowsPath?: string; rowsNote?: string; rowCount: number; evidenceHit?: string; columns?: Column[]; missing: string[] };
-type TryResult = ({ ok: true } & Verified) | { ok: false; reason: string; snippet?: string };
-
-// Execute a proposal with the recorded values. Guard rails: allowlisted hosts
-// only, GET/POST only, no custom headers, one request, no pagination.
-async function tryProposal(call: NonNullable<Proposal['call']>, hosts: string[], evidence: string[], marks: string[], signal: AbortSignal): Promise<TryResult> {
-  if (call.method !== 'GET' && call.method !== 'POST') {
-    return { ok: false, reason: `method ${call.method} is not allowed (GET or POST only)` };
+  const columns = [...new Set(run.rows.flatMap((r) => Object.keys(r)))];
+  const missing = marks.filter((m) => !run.rows.some((r) => [...leaves(r)].some(({ value }) => markMatches(value, m))));
+  if (marks.length) {
+    if (missing.length === marks.length) {
+      return {
+        ok: false,
+        reason: `the rows carry none of the operator's marked selections as a field value (${marks.map(shortMark).join(', ')}). First row: ${JSON.stringify(run.rows[0]).slice(0, 400)}`,
+      };
+    }
+    const note = missing.length ? `${marks.length - missing.length} of ${marks.length} marked selections located` : `all ${marks.length} marked selection(s) located`;
+    if (missing.length) {
+      return {
+        ok: false,
+        reason: `${note}; missing: ${missing.map(shortMark).join(', ')}. Add the field(s) that carry the missing text, or say why no source has it.`,
+        partial: { run, missing, columns },
+      };
+    }
+    return { ok: true, run, missing, columns, note };
   }
-  if (!Array.isArray(call.params) || call.params.length === 0) {
-    return { ok: false, reason: 'the proposal names no parameters — the automation must be parameterised on the typed input' };
-  }
-  const values = Object.fromEntries(call.params.map((p) => [p.name, p.recordedValue]));
-  const url = substituteUrl(call.url, values);
-  if (!hostAllowed(url, hosts)) {
-    return { ok: false, reason: `URL host is outside the recording's allowlist (${hosts.join(', ')})` };
-  }
-  const body = call.body == null ? undefined : substituteBody(call.body, values);
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: call.method,
-      headers: {
-        accept: 'application/json, */*',
-        'user-agent': UA,
-        ...(body !== undefined ? { 'content-type': 'application/json; charset=utf-8' } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      signal,
-    });
-  } catch (e) {
-    return { ok: false, reason: `request failed to reach ${url}: ${(e as Error).message}` };
-  }
-  const text = await res.text();
-  if (res.status < 200 || res.status >= 300) {
-    return { ok: false, reason: `HTTP ${res.status}`, snippet: text.slice(0, 300) };
-  }
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch {
-    return { ok: false, reason: 'response is not JSON — the outcome must be structured data', snippet: text.slice(0, 300) };
-  }
-  if (parsed === null || typeof parsed !== 'object') {
-    return { ok: false, reason: 'response parsed to a bare value, not structured data', snippet: text.slice(0, 300) };
-  }
-  const hay = markKey(text);
-  const evidenceHit = evidence.find((ev) => hay.includes(ev));
-  if (evidence.length && !evidenceHit) {
+  // No marks: the typed value, or a clicked result, must be in the rows.
+  const hay = run.rows.slice(0, 200).map(rowText).join('\n');
+  const typed = params.find((p) => p.value.length >= 2 && hay.includes(markKey(p.value)));
+  const seen = evidence.find((ev) => hay.includes(ev));
+  if (!typed && !seen) {
     return {
       ok: false,
-      reason: 'response is structured but carries none of the evidence the operator saw while recording',
-      snippet: text.slice(0, 300),
+      reason: `the rows carry neither the typed value (${params.map((p) => `"${p.value}"`).join(', ')}) nor a result the operator clicked${evidence.length ? ` (${evidence.map((e) => `"${e}"`).join(', ')})` : ''}. First row: ${JSON.stringify(run.rows[0]).slice(0, 400)}`,
     };
   }
-  // What the operator marked is what a run must return: the marks are located
-  // in this very response and become the spec's columns.
-  const missing = missingMarks(parsed, marks);
-  if (marks.length && missing.length === marks.length) {
-    return {
-      ok: false,
-      reason: `response is structured but carries none of the marked selections as a field (${marks.map(shortMark).join(', ')}) — the automation must return what the operator marked`,
-      snippet: text.slice(0, 300),
-    };
-  }
-  const rows = chooseRows(parsed, marks, evidence, call.rowsPath);
-  const columns = locateColumns(parsed, rows?.path || undefined, marks);
-  return { ok: true, rowsPath: rows?.path || undefined, rowsNote: rows?.note, rowCount: rows?.path ? rows.rows.length : 1, evidenceHit, columns, missing };
+  return { ok: true, run, missing: [], columns, note: typed ? `rows carry the typed value "${typed.value}"` : `rows carry the clicked result "${seen}"` };
 }
 
-function assembleSpec(call: NonNullable<Proposal['call']>, meta: Meta, a: Analysis, p: Proposal, v: Verified, mode: 'repair' | 'refine', feedback: string): Spec {
-  return {
-    version: SPEC_VERSION,
-    name: meta.session,
-    origin: new URL(substituteUrl(call.url, {})).origin,
-    language: a.language,
-    parameters: call.params.map((x) => ({ name: x.name, example: x.recordedValue, required: true })),
-    steps: [{
-      id: 'search',
-      type: 'request',
-      method: call.method,
-      url: call.url,
-      headers: {
-        accept: 'application/json, */*',
-        'user-agent': UA,
-        ...(call.body != null ? { 'content-type': 'application/json; charset=utf-8' } : {}),
+// --- tools -------------------------------------------------------------------
+
+const TOOLS: Anthropic.Beta.BetaTool[] = [
+  {
+    name: 'read_body',
+    description: 'Read a captured request/response body (by event seq) or a probe result (by probe id) in pages. Returns the page of text plus the total length and, for JSON, its shape.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        seq: { type: 'integer', description: 'seq of a recorded net event' },
+        probe: { type: 'integer', description: 'id of an earlier probe result' },
+        part: { type: 'string', enum: ['response', 'request'], description: 'which body (default response)' },
+        offset: { type: 'integer', description: 'character offset to start from (default 0)' },
+        length: { type: 'integer', description: `characters to return (max ${PAGE_CHARS})` },
       },
-      ...(call.body != null ? { bodyTemplate: call.body } : {}),
-    }],
-    outcome: {
-      fromStep: 'search',
-      expect: { path: '__http_ok', equals: 'true' },
-      extract: v.rowsPath ? { records: v.rowsPath } : {},
-      ...(v.columns ? { columns: v.columns } : {}),
+      additionalProperties: false,
     },
-    repaired: { at: new Date().toISOString(), model: MODEL, diagnosis: p.diagnosis, mode, ...(feedback ? { feedback } : {}) },
-  };
+    strict: true,
+  } as Anthropic.Beta.BetaTool,
+  {
+    name: 'probe',
+    description: 'Send one HTTP request (no cookies, no credentials) and see the response: status, content type, length, JSON shape and the first 4000 characters. The full body is kept as a probe result for read_body.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        method: { type: 'string', enum: ['GET', 'POST'] },
+        url: { type: 'string' },
+        headers: { type: 'object', additionalProperties: { type: 'string' } },
+        body: { description: 'request body: an object (sent as JSON) or a string' },
+      },
+      required: ['method', 'url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'open_page',
+    description: 'Load a URL in a headless browser, optionally perform actions on it, then read the page: its visible text, the HTML of one element, or the JSON result of a JavaScript expression evaluated in the page.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string' },
+        actions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              do: { type: 'string', enum: ['fill', 'click', 'press', 'wait'] },
+              selector: { type: 'string' },
+              value: { type: 'string', description: 'text to fill, key to press, or selector to wait for' },
+            },
+            required: ['do'],
+            additionalProperties: false,
+          },
+        },
+        read: { type: 'string', enum: ['text', 'html', 'eval'], description: 'what to return (default text)' },
+        selector: { type: 'string', description: 'for text/html: limit to this element' },
+        expression: { type: 'string', description: 'for eval: a JavaScript expression evaluated in the page' },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'write_script',
+    description: 'Submit the session script. It is linted, executed with the recorded inputs and checked against the recording; the result tells you whether it was accepted and, if not, exactly why.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', description: 'the full script defining async function run(ctx)' },
+        title: { type: 'string', description: 'short human name for the automation, e.g. "Wikipedia Article Lookup"' },
+        summary: { type: 'string', description: 'one or two sentences: what the recording needed and how the script reaches the outcome' },
+      },
+      required: ['source', 'title', 'summary'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'give_up',
+    description: 'Declare that no automation can be derived from this recording, with concrete advice on how to re-record so that one can.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string' },
+        advice: { type: 'string' },
+      },
+      required: ['reason', 'advice'],
+      additionalProperties: false,
+    },
+  },
+];
+
+type ToolCtx = {
+  events: Record<string, unknown>[];
+  probes: { url: string; text: string }[];
+  signal: AbortSignal;
+  emit: Emit;
+};
+
+function pageOf(text: string, offset: number | undefined, length: number | undefined, label: string): string {
+  const from = Math.max(0, offset ?? 0);
+  const len = Math.min(PAGE_CHARS, Math.max(1, length ?? PAGE_CHARS));
+  const parsed = tryJson(text);
+  const head = `${label}: ${text.length} chars${parsed !== undefined ? `; JSON shape ${shapeOf(parsed).slice(0, 800)}` : ''}; showing ${from}–${Math.min(text.length, from + len)}`;
+  return `${head}\n${text.slice(from, from + len)}${from + len < text.length ? `\n…(${text.length - from - len} more chars; call again with offset ${from + len})` : ''}`;
 }
 
-function parseProposal(text: string): Proposal | { parseError: string } {
-  const raw = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-  try {
-    const p = JSON.parse(raw) as Proposal;
-    if (!p.diagnosis || (p.action !== 'propose' && p.action !== 'stop')) {
-      return { parseError: 'JSON parsed but is missing "diagnosis" or a valid "action"' };
+async function runTool(name: string, input: Record<string, unknown>, ctx: ToolCtx): Promise<string> {
+  if (name === 'read_body') {
+    const part = input.part === 'request' ? 'reqBody' : 'resBody';
+    if (typeof input.probe === 'number') {
+      const p = ctx.probes[input.probe];
+      if (!p) return `no probe #${input.probe}`;
+      return pageOf(p.text, input.offset as number, input.length as number, `probe #${input.probe} ${p.url}`);
     }
-    if (p.action === 'propose' && !p.call?.url) {
-      return { parseError: 'action is "propose" but "call.url" is missing' };
-    }
-    return p;
-  } catch (e) {
-    return { parseError: `reply was not valid JSON: ${(e as Error).message}` };
+    const e = ctx.events.find((x) => x.kind === 'net' && Number(x.seq) === Number(input.seq));
+    if (!e) return `no net event with seq ${input.seq} (net_meta events have no captured body — probe the URL instead)`;
+    const text = String(e[part] ?? '');
+    const cut = part === 'resBody' && typeof e.resTruncated === 'number' ? ` (CUT by the recorder; the full response was ${e.resTruncated} chars — probe the URL to fetch it in full)` : '';
+    return pageOf(text, input.offset as number, input.length as number, `#${e.seq} ${part} of ${e.method} ${e.url}${cut}`);
   }
+  if (name === 'probe') {
+    const method = String(input.method ?? 'GET').toUpperCase();
+    const url = String(input.url ?? '');
+    const headers: Record<string, string> = { 'user-agent': UA, accept: 'application/json, text/html;q=0.9, */*;q=0.8' };
+    for (const [k, v] of Object.entries((input.headers as Record<string, string>) ?? {})) {
+      if (/cookie|authorization|x-api-key/i.test(k)) continue;
+      headers[k.toLowerCase()] = String(v);
+    }
+    let body: string | undefined;
+    if (input.body !== undefined && input.body !== null) {
+      body = typeof input.body === 'string' ? input.body : JSON.stringify(input.body);
+      if (typeof input.body !== 'string' && !headers['content-type']) headers['content-type'] = 'application/json; charset=utf-8';
+    }
+    ctx.emit('tool', `probe ${method} ${url}`);
+    try {
+      const res = await fetch(url, { method, headers, ...(body === undefined ? {} : { body }), signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(30_000)]) });
+      const text = (await res.text()).slice(0, 8 * 1024 * 1024);
+      const id = ctx.probes.push({ url, text }) - 1;
+      const parsed = tryJson(text);
+      return `probe #${id}: HTTP ${res.status} ${res.headers.get('content-type') ?? ''}; ${text.length} chars${parsed !== undefined ? `; JSON shape ${shapeOf(parsed).slice(0, 800)}` : ''}\n${text.slice(0, 4000)}${text.length > 4000 ? `\n…(read_body with probe ${id} for the rest)` : ''}`;
+    } catch (e) {
+      return `probe failed: ${(e as Error).message}`;
+    }
+  }
+  if (name === 'open_page') {
+    const url = String(input.url ?? '');
+    ctx.emit('tool', `open_page ${url}${Array.isArray(input.actions) && input.actions.length ? ` (${input.actions.length} action(s))` : ''}`);
+    const session = browserSession(undefined, ctx.signal);
+    try {
+      const page = await session.open(url);
+      for (const act of (input.actions as { do: string; selector?: string; value?: string }[]) ?? []) {
+        if (act.do === 'fill') await page.fill(String(act.selector), String(act.value ?? ''));
+        else if (act.do === 'click') await page.click(String(act.selector));
+        else if (act.do === 'press') await page.press(String(act.selector ?? 'body'), String(act.value ?? 'Enter'));
+        else if (act.do === 'wait') {
+          if (act.value && !/^\d+$/.test(act.value)) await page.waitFor(act.value);
+          else if (act.selector) await page.waitFor(act.selector);
+          else await page.wait(Number(act.value) || 1500);
+        }
+      }
+      const read = String(input.read ?? 'text');
+      const selector = input.selector ? String(input.selector) : undefined;
+      let out: string;
+      if (read === 'html') out = await page.html(selector);
+      else if (read === 'eval') out = JSON.stringify(await page.eval(String(input.expression ?? 'null')), null, 1);
+      else out = await page.text(selector);
+      return `page ${page.url()}\n${out.slice(0, PAGE_CHARS)}${out.length > PAGE_CHARS ? `\n…(${out.length - PAGE_CHARS} more chars; narrow with selector or eval)` : ''}`;
+    } catch (e) {
+      return `open_page failed: ${(e as Error).message}`;
+    } finally {
+      await session.dispose();
+    }
+  }
+  return `unknown tool ${name}`;
+}
+
+// --- the loop ----------------------------------------------------------------
+
+function estimateSpend(model: string, usage: { input: number; cacheRead: number; cacheWrite: number; output: number }): string {
+  const p = PRICE[model];
+  if (!p) return `${usage.input + usage.cacheRead + usage.cacheWrite} input / ${usage.output} output tokens`;
+  const usd = (usage.input * p.in + usage.cacheRead * p.in * 0.1 + usage.cacheWrite * p.in * 1.25 + usage.output * p.out) / 1e6;
+  return `≈ $${usd.toFixed(2)} (${usage.input + usage.cacheRead + usage.cacheWrite} input / ${usage.output} output tokens)`;
 }
 
 export async function repairSession(id: string, emit: Emit, signal: AbortSignal, input: RepairInput = {}): Promise<void> {
@@ -305,6 +426,7 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
   if (!meta) { emit('error', 'unknown session'); return; }
   if (status(meta) !== 'complete') { emit('error', `session is ${status(meta)} — only complete recordings can be repaired`); return; }
   const existing = getSpec(id) as Spec | undefined;
+  const existingScript = existing?.steps.find((s) => s.type === 'script');
   const mode = existing ? 'refine' : 'repair';
   const feedback = (input.feedback ?? '').trim();
 
@@ -312,33 +434,41 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
   const events = readEvents(id);
   const a = analyse({ meta: { session: id, status: 'complete' }, events });
   const marks = a.marks;
+  const params = paramNames(a);
   const evidence = evidenceStrings(events, a);
 
   if (existing) {
-    emit('info', `Refining the saved automation: ${describeSpec(existing)}.`);
+    emit('info', `Refining the saved automation: ${describeSpec(existing, undefined).split('\n')[0]}.`);
     if (input.lastRun !== undefined) emit('info', `Last run returned: ${describeRun(input.lastRun)}`);
     emit('info', feedback ? `Your note: ${feedback}` : 'No note given — comparing your marked selections with what the run returned.');
   } else {
     emit('info', `Deterministic analysis refused: ${a.notes.join(' ') || 'no parameterised outcome call identified.'}`);
   }
+  if (params.length) emit('info', `Parameters: ${params.map((p) => `${p.name}="${p.value}"`).join(', ')}`);
   if (marks.length) emit('info', `Marked while recording (${marks.length}): ${marks.map(shortMark).join(', ')}`);
+  if (!params.length && !marks.length) {
+    emit('advice', 'Nothing was typed and nothing was marked, so there is no input to parameterise and no result to verify against. Re-record: type the search value, and highlight the data you want returned, then click "Mark data".');
+    emit('done', 'No automation is possible from this recording.');
+    return;
+  }
 
+  const firstPage = events.find((e) => e.kind === 'page' && typeof e.url === 'string')?.url as string | undefined;
   const pack = [
     ...(existing ? [
-      'Mode: REFINE. The session already has an automation, but its result did not match what the operator wanted.',
-      `Current automation: ${describeSpec(existing)}`,
+      'MODE: REFINE. The session already has an automation, but its result did not match what the operator wanted.',
+      `Current automation: ${describeSpec(existing, existingScript ? getScript(id, existingScript.file) : undefined)}`,
       `Last run (what the operator received): ${input.lastRun === undefined ? 'not reported' : describeRun(input.lastRun)}`,
       `Operator feedback: ${feedback ? `"${feedback}"` : 'none — compare the marked selections with the last run yourself'}`,
       '',
-    ] : []),
-    `Session "${id}". Allowlisted hosts: ${meta.hosts.join(', ')}.`,
+    ] : ['MODE: REPAIR. The deterministic analyser could not derive an automation from this recording.', '']),
+    `Session "${id}". Site: ${meta.hosts.join(', ')}. First page: ${firstPage ?? 'unknown'}. Language: ${a.language}.`,
     `Analyser notes: ${a.notes.join(' ') || 'none'}`,
-    `Typed inputs: ${a.inputs.map((i) => `${i.field}="${i.value}"`).join(', ') || 'NONE'}`,
-    `Marked text (what every run must return, as plain fields): ${marks.map((m) => `"${markKey(m).slice(0, 200)}"`).join(', ') || 'none'}`,
-    `Evidence a correct outcome response should carry (normalised): ${evidence.map((e) => `"${e}"`).join(', ') || 'none available'}`,
+    `Parameters (ctx.inputs) and their recorded values: ${params.map((p) => `${p.name}="${p.value}" (typed into ${p.field})`).join(', ') || 'NONE — this is a zero-parameter automation: the script takes no input and must return the marked data'}`,
+    `Marked text (each must appear as a field value in the rows): ${marks.map((m) => `"${m.slice(0, 400)}"`).join(' | ') || 'none'}`,
+    `Results the operator clicked (normalised): ${evidence.filter((e) => !marks.some((m) => markKey(m).startsWith(e))).map((e) => `"${e}"`).join(', ') || 'none'}`,
     '',
-    'Recording digest (ordered):',
-    digest(events),
+    `Recording (${events.length} events, ordered; bodies previewed — read_body for the full text):`,
+    overview(events, a),
   ].join('\n');
 
   let client: Anthropic;
@@ -352,99 +482,134 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
     return;
   }
 
-  type Attempt = { call: NonNullable<Proposal['call']>; p: Proposal; v: Verified; note?: string };
-  const save = (best: Attempt) => {
-    saveSpec(id, assembleSpec(best.call, meta, a, best.p, best.v, mode, feedback));
-    if (!meta.name && best.p.title) {
-      meta.name = best.p.title.slice(0, 80);
-      saveMeta(meta);
-    }
-    const title = !existing && best.p.title ? ` as "${best.p.title}"` : '';
-    emit('saved', `Automation ${existing ? 'updated' : 'saved'}${title}${best.note ? ` — ${best.note}` : ''}. Run it with any new input — no re-recording needed.`);
+  const ctx: ToolCtx = { events, probes: [], signal, emit };
+  const usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+  let toolCalls = 0;
+  let scriptTries = 0;
+  let partial: { source: string; title: string; summary: string; run: ScriptOk; missing: string[]; columns: string[] } | undefined;
+
+  const save = (source: string, title: string, summary: string, run: ScriptOk, note: string) => {
+    const columns = [...new Set(run.rows.flatMap((r) => Object.keys(r)))];
+    saveScript(id, SCRIPT_FILE, source);
+    const spec: Spec = {
+      version: SPEC_VERSION,
+      name: id,
+      origin: firstPage ? new URL(firstPage).origin : `https://${meta.hosts[0]}`,
+      language: a.language,
+      parameters: params.map((p) => ({ name: p.name, example: p.value, required: true })),
+      steps: [{ id: 'automation', type: 'script', file: SCRIPT_FILE, reason: summary, hosts: run.hosts }],
+      outcome: { fromStep: 'automation', expect: { path: '__http_ok', equals: 'true' }, extract: { records: 'rows' } },
+      repaired: { at: new Date().toISOString(), model: MODEL, diagnosis: summary, summary, mode, ...(feedback ? { feedback } : {}) },
+    };
+    saveSpec(id, spec);
+    if (!meta.name && title) { meta.name = title.slice(0, 80); saveMeta(meta); }
+    emit('saved', `Automation ${existing ? 'updated' : 'saved'}${!existing && title ? ` as "${title}"` : ''} — ${note}; ${run.rows.length} row(s) with columns ${columns.join(', ')}; hosts ${run.hosts.join(', ') || 'none'}. Run it with any new input — no re-recording needed.`);
   };
-  // A response carrying some of the marks is worth keeping if nothing better
-  // turns up: the loop asks for the rest first and falls back to it honestly.
-  let partial: Attempt | undefined;
+  const finish = (kind: string, text: string) => {
+    emit(kind, text);
+    emit('info', `Spend this repair: ${estimateSpend(MODEL, usage)}`);
+  };
 
-  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: pack }];
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{
+    role: 'user',
+    content: [{ type: 'text', text: pack, cache_control: { type: 'ephemeral' } }],
+  }];
+  const betas: string[] = [];
+  const fallbackable = /opus|fable/.test(MODEL);
+  if (fallbackable) betas.push('server-side-fallback-2026-07-01');
+
+  for (let turn = 1; turn <= MAX_TURNS; turn++) {
     if (signal.aborted) { emit('info', 'stopped by the operator'); return; }
-    emit('llm', `Round ${round}: asking ${MODEL}…`);
-    let reply: string;
+    if (usage.input + usage.cacheRead + usage.cacheWrite > MAX_INPUT_TOKENS) {
+      if (partial) { save(partial.source, partial.title, partial.summary, partial.run, `token budget reached; kept the best verified attempt (${marks.length - partial.missing.length} of ${marks.length} marked selections)`); finish('done', 'Budget reached.'); return; }
+      finish('done', 'Token budget for this repair reached without a verified automation.');
+      return;
+    }
+    emit('llm', `Turn ${turn}: ${MODEL} is thinking…`);
+    let msg: Anthropic.Beta.BetaMessage;
     try {
-      const res = await client.beta.messages.create({
+      const stream = client.beta.messages.stream({
         model: MODEL,
-        max_tokens: 4000,
-        betas: ['server-side-fallback-2026-07-01'],
-        fallbacks: 'default',
-        system: SYSTEM,
+        max_tokens: 12_000,
+        system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
+        tools: TOOLS,
         messages,
-      });
-      if (res.stop_reason === 'refusal') {
-        emit('error', 'the model declined to work on this recording');
-        return;
-      }
-      reply = res.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+        ...(betas.length ? { betas } : {}),
+        ...(fallbackable ? { fallbacks: 'default' as const } : {}),
+      } as Parameters<typeof client.beta.messages.stream>[0]);
+      msg = await stream.finalMessage();
     } catch (e) {
-      emit('error', `model call failed: ${(e as Error).message}`);
+      finish('error', `model call failed: ${(e as Error).message}`);
       return;
     }
+    usage.input += msg.usage.input_tokens;
+    usage.output += msg.usage.output_tokens;
+    usage.cacheRead += msg.usage.cache_read_input_tokens ?? 0;
+    usage.cacheWrite += msg.usage.cache_creation_input_tokens ?? 0;
+    if (msg.stop_reason === 'refusal') { finish('error', 'the model declined to work on this recording'); return; }
 
-    const p = parseProposal(reply);
-    if ('parseError' in p) {
-      emit('fail', `model reply unusable (${p.parseError}) — asking again`);
-      messages.push({ role: 'assistant', content: reply });
-      messages.push({ role: 'user', content: `Your reply could not be used: ${p.parseError}. Reply with ONLY the JSON object described in your instructions.` });
-      continue;
-    }
-
-    emit('llm', p.diagnosis);
-    if (p.action === 'stop') {
-      emit('advice', p.advice ?? 'the model sees no automatable path in this recording');
-      if (partial) { save({ ...partial, note: `kept the best verified attempt: ${partial.note}` }); return; }
-      emit('done', existing
-        ? 'No better automation was verified; the saved one is unchanged. Add a note describing the problem and try again, or re-record following the advice above.'
-        : 'No automation is possible from this recording. Re-record following the advice above.');
-      return;
-    }
-
-    const call = p.call!;
-    emit('try', `${call.method} ${call.url} — executing with the recorded value(s)…`);
-    const result = await tryProposal(call, meta.hosts, evidence, marks, signal);
-    if (!result.ok) {
-      emit('fail', result.reason + (result.snippet ? ` — response starts: ${result.snippet}` : ''));
-      messages.push({ role: 'assistant', content: reply });
-      messages.push({
-        role: 'user',
-        content: `The proposal was executed with the recorded values and failed: ${result.reason}.` +
-          (result.snippet ? ` The response starts with: ${result.snippet}` : '') +
-          ' Propose a different call, or stop with re-record advice.',
-      });
-      continue;
-    }
-
-    if (result.rowsNote) emit('info', result.rowsNote);
-    emit('ok', `verified: structured response, ${result.rowCount} row(s)${result.rowsPath ? ` at ${result.rowsPath}` : ''}` +
-      (result.evidenceHit ? `, carrying the recorded evidence ("${result.evidenceHit}")` : '') +
-      (result.columns ? `; columns from your marked selections: ${result.columns.map((c) => c.name).join(', ')}` : ''));
-    if (result.missing.length) {
-      const note = `${marks.length - result.missing.length} of ${marks.length} marked selections located; missing: ${result.missing.map(shortMark).join(', ')}`;
-      if (!partial || partial.v.missing.length > result.missing.length) partial = { call, p, v: result, note };
-      if (round < MAX_ROUNDS) {
-        emit('fail', `${note} — asking for a call whose response also carries the missing selection(s)`);
-        messages.push({ role: 'assistant', content: reply });
-        messages.push({
-          role: 'user',
-          content: `The proposal was executed with the recorded values. The response is structured and carries some of the operator's marked selections (rows read at ${result.rowsPath ?? 'the whole response'}), but not: ${result.missing.map(shortMark).join(', ')}. Propose a call whose response also returns the missing marked text as plain field values, or stop with advice if no API can return it.`,
-        });
+    for (const b of msg.content) if (b.type === 'text' && b.text.trim()) emit('llm', b.text.trim());
+    const uses = msg.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use');
+    messages.push({ role: 'assistant', content: msg.content });
+    if (!uses.length) {
+      if (msg.stop_reason === 'max_tokens') {
+        messages.push({ role: 'user', content: 'Your reply was cut off. Continue, and keep prose short: the script goes in write_script.' });
         continue;
       }
+      messages.push({ role: 'user', content: 'Continue with a tool call: investigate with read_body/probe/open_page, submit with write_script, or give_up with re-recording advice.' });
+      continue;
     }
-    save({ call, p, v: result, note: result.missing.length ? `${marks.length - result.missing.length} of ${marks.length} marked selections located` : undefined });
-    return;
+
+    const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
+    for (const use of uses) {
+      const args = (use.input ?? {}) as Record<string, unknown>;
+      toolCalls++;
+      if (use.name === 'give_up') {
+        emit('llm', String(args.reason ?? ''));
+        emit('advice', String(args.advice ?? 'the model sees no automatable path in this recording'));
+        if (partial) { save(partial.source, partial.title, partial.summary, partial.run, `kept the best verified attempt (${marks.length - partial.missing.length} of ${marks.length} marked selections)`); finish('done', 'Saved the partial automation.'); return; }
+        finish('done', existing
+          ? 'No better automation was verified; the saved one is unchanged. Add a note describing the problem and try again, or re-record following the advice above.'
+          : 'No automation is possible from this recording. Re-record following the advice above.');
+        return;
+      }
+      if (use.name === 'write_script') {
+        scriptTries++;
+        const source = String(args.source ?? '');
+        const title = String(args.title ?? '').slice(0, 80);
+        const summary = String(args.summary ?? '').slice(0, 600);
+        emit('try', `Script attempt ${scriptTries}: executing with the recorded input(s)… (${source.length} chars)`);
+        const v = await accept(source, params, marks, evidence);
+        if (v.ok) {
+          emit('ok', `verified: ${v.note}; ${v.run.rows.length} row(s), columns ${v.columns.join(', ')}, hosts ${v.run.hosts.join(', ') || 'none'}, ${(v.run.ms / 1000).toFixed(1)}s`);
+          save(source, title, summary, v.run, v.note);
+          finish('done', 'Done.');
+          return;
+        }
+        emit('fail', v.reason);
+        if (v.partial && (!partial || partial.missing.length > v.partial.missing.length)) {
+          partial = { source, title, summary, run: v.partial.run, missing: v.partial.missing, columns: v.partial.columns };
+        }
+        if (scriptTries >= MAX_SCRIPT_TRIES) {
+          if (partial) { save(partial.source, partial.title, partial.summary, partial.run, `attempt limit reached; kept the best verified attempt (${marks.length - partial.missing.length} of ${marks.length} marked selections)`); finish('done', 'Saved the partial automation.'); return; }
+          finish('done', `No working automation after ${MAX_SCRIPT_TRIES} script attempts. The recording may need to be redone.`);
+          return;
+        }
+        results.push({ type: 'tool_result', tool_use_id: use.id, content: `REJECTED: ${v.reason}`, is_error: true });
+        continue;
+      }
+      if (toolCalls > MAX_TOOL_CALLS) {
+        results.push({ type: 'tool_result', tool_use_id: use.id, content: 'Tool budget exhausted: submit write_script now with your best script, or give_up.', is_error: true });
+        continue;
+      }
+      if (use.name === 'read_body') emit('tool', `read_body ${typeof args.probe === 'number' ? `probe #${args.probe}` : `#${args.seq}`}${args.offset ? ` from ${args.offset}` : ''}`);
+      const out = await runTool(use.name, args, ctx).catch((e) => `tool failed: ${(e as Error).message}`);
+      results.push({ type: 'tool_result', tool_use_id: use.id, content: out });
+    }
+    messages.push({ role: 'user', content: results });
   }
-  if (partial) { save({ ...partial, note: `kept the best verified attempt: ${partial.note}` }); return; }
-  emit('done', existing
-    ? `No better automation was verified after ${MAX_ROUNDS} rounds; the saved one is unchanged.`
-    : `No working automation found after ${MAX_ROUNDS} rounds. The recording may need to be redone.`);
+  if (partial) { save(partial.source, partial.title, partial.summary, partial.run, `turn limit reached; kept the best verified attempt (${marks.length - partial.missing.length} of ${marks.length} marked selections)`); finish('done', 'Saved the partial automation.'); return; }
+  finish('done', existing
+    ? `No better automation was verified after ${MAX_TURNS} turns; the saved one is unchanged.`
+    : `No working automation found after ${MAX_TURNS} turns. The recording may need to be redone.`);
 }

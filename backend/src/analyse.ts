@@ -21,6 +21,7 @@ export type Call = {
   resBody?: string;
   matches: Match[];      // input values found inside this request
   resultShape?: string;  // short description of the response payload when structured
+  resTruncated?: number; // full response length when the recorder cut the body
   outcomeScore: number;
 };
 
@@ -312,6 +313,7 @@ export function analyse(trace: Trace): Analysis {
         url: e.url as string, method: (e.method as string) ?? 'GET', status: (e.status as number) ?? 0,
         seq: (e.seq as number) ?? 0,
         reqBody: e.reqBody as string, resBody: e.resBody as string,
+        ...(typeof e.resTruncated === 'number' ? { resTruncated: e.resTruncated } : {}),
         matches, resultShape: shape, outcomeScore,
       };
     });
@@ -322,7 +324,11 @@ export function analyse(trace: Trace): Analysis {
   const ranked = calls.filter((c) => isStructured(c.resBody)).sort((a, b) => b.outcomeScore - a.outcomeScore);
   const outcome = ranked[0]?.matches.length ? ranked[0] : undefined;
   if (!outcome && calls.some((c) => c.matches.length)) {
-    notes.push('the request(s) carrying the typed value returned no structured data (a server-rendered results page?) — there is no direct call to promote');
+    // A cut body parses as nothing: say so, rather than blaming the site.
+    const cut = calls.find((c) => c.matches.length && c.resTruncated);
+    notes.push(cut
+      ? `the response carrying the typed value was cut by the recorder at ${cut.resBody?.length ?? 0} of ${cut.resTruncated} characters, so it could not be read as structured data — the LLM repair can fetch it in full`
+      : 'the request(s) carrying the typed value returned no structured data (a server-rendered results page?) — there is no direct call to promote');
   }
 
   // Chain detection needs positive evidence, never a guess: a marked value
@@ -384,7 +390,7 @@ export function analyse(trace: Trace): Analysis {
   }
 
   if (!inputs.length) notes.push('No operator input values captured — nothing to parameterise.');
-  if (!calls.length) notes.push('No same-site network calls captured — outcome may be pure DOM, browser steps required.');
+  if (!calls.length) notes.push('No network calls with bodies captured — outcome may be pure DOM, browser steps required.');
   if (calls.length && !outcome && !calls.some((c) => c.matches.length)) notes.push('No request carried an input value; cannot identify a parameterised outcome call from requests alone.');
 
   let authHint: string | undefined;
