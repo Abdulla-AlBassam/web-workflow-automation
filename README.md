@@ -202,6 +202,17 @@ Nobody can, and the tool says so:
 - **Non-text outcomes.** PDF, CSV downloads and images are not structured
   in the tool's sense.
 
+Why the line sits where it does: three things must hold before the tool
+hands over an automation. The evidence must be complete (the recording),
+the runner must be able to do what the automation needs (requests, a
+browser page, the site's own token), and the tool must be able to check
+the result without causing harm. The third is the one that limits scope.
+A lookup can be checked for free: run it with the recorded value and
+compare the rows with what was marked; nothing happens in the world. A
+form that books, registers or submits can only be checked by submitting
+again, so the tool does not attempt such workflows. The assistant could
+write them; it could not prove them, and nothing unproven is saved.
+
 Shape limits of the current build:
 
 - **One-hop chains** in the deterministic pipeline: a search response feeds
