@@ -208,7 +208,10 @@ site changes, the script fails with a reason and the button is there again.
   hostile author: the code comes from the assistant under the tool's
   instructions, is shown in full, and is saved only after it reproduced the
   recording.
-- Every run is started by a person. Test suites use local fixtures only.
+- Every run is started by a person. Stopping a recording sends one
+  request on its own: the recorded outcome call, replayed without
+  credentials, so the generator learns whether a token step is needed.
+  Test suites use local fixtures only.
 - The one authenticated call in the Sijilat demonstration uses the
   anonymous token the site issues to every visitor. The runner reads it; it
   never derives or submits a credential.

@@ -43,8 +43,10 @@ for (const port of [4823, 4980]) {
 
 const dataDir = mkdtempSync(join(tmpdir(), 'wfr-e2e-data-'));
 const profileDir = mkdtempSync(join(tmpdir(), 'wfr-e2e-profile-'));
+// The backend is spawned as node itself, not through npx: killing an npx
+// wrapper leaves its child running and the next suite finds the port busy.
 const procs = [
-  spawn('npx', ['tsx', 'backend/src/server.ts'], { cwd: root, env: { ...process.env, DATA_DIR: dataDir }, stdio: 'inherit' }),
+  spawn(process.execPath, ['--import', 'tsx', 'backend/src/server.ts'], { cwd: root, env: { ...process.env, DATA_DIR: dataDir }, stdio: 'inherit' }),
   spawn('node', ['fixtures/serve.mjs'], { cwd: root, stdio: 'inherit' }),
 ];
 

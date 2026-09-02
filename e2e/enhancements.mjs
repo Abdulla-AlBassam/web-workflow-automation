@@ -29,8 +29,10 @@ await ensureFree(BACKEND_PORT);
 await ensureFree(MOCK_PORT);
 
 const dataDir = mkdtempSync(join(tmpdir(), 'wfr-enh-'));
+// The backend is spawned as node itself, not through npx: killing an npx
+// wrapper leaves its child running and the next suite finds the port busy.
 const procs = [
-  spawn('npx', ['tsx', 'backend/src/server.ts'], { cwd: process.cwd(), env: { ...process.env, DATA_DIR: dataDir, PORT: String(BACKEND_PORT) }, stdio: 'ignore' }),
+  spawn(process.execPath, ['--import', 'tsx', 'backend/src/server.ts'], { cwd: process.cwd(), env: { ...process.env, DATA_DIR: dataDir, PORT: String(BACKEND_PORT) }, stdio: 'ignore' }),
   spawn('node', ['fixtures/serve.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: String(MOCK_PORT) }, stdio: 'ignore' }),
 ];
 

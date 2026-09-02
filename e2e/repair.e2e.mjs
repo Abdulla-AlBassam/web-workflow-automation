@@ -201,7 +201,9 @@ llm.listen(LLM_PORT);
 const sites = spawn('node', ['fixtures/sites.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: String(SITES_PORT) }, stdio: 'ignore' });
 
 const dataDir = mkdtempSync(join(tmpdir(), 'wfr-repair-'));
-const backend = spawn('npx', ['tsx', 'backend/src/server.ts'], {
+// The backend is spawned as node itself, not through npx: killing an npx
+// wrapper leaves its child running and the next suite finds the port busy.
+const backend = spawn(process.execPath, ['--import', 'tsx', 'backend/src/server.ts'], {
   cwd: process.cwd(),
   env: { ...process.env, DATA_DIR: dataDir, PORT: String(BACKEND_PORT),
     ANTHROPIC_API_KEY: 'test-key', ANTHROPIC_BASE_URL: `http://127.0.0.1:${LLM_PORT}`, REPAIR_MODEL: 'claude-sonnet-5' },

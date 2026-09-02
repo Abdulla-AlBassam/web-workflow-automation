@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { analyse } from '../backend/src/analyse.ts';
 import { toSpec } from '../backend/src/generate.ts';
 import { run } from '../runner/src/run.ts';
+import { lintScript } from '../runner/src/script.ts';
 
 const MOCK_PORT = 4983; // dedicated port: never collide with an interactive mock or backend
 const MOCK = `http://127.0.0.1:${MOCK_PORT}`;
@@ -77,12 +78,46 @@ try {
   const noTok = await run(authSpec, { [pname]: '84121' }, { readToken: async () => undefined });
   check('absent token stops the run', !noTok.ok && /issued no recognisable token/.test(noTok.stoppedReason || ''), noTok.stoppedReason);
 
+  // 5b. A token reader that throws (a browser that cannot launch) is a named
+  // stop like any other, never an exception for the server to turn into a 500.
+  const tokThrows = await run(authSpec, { [pname]: '84121' },
+    { readToken: async () => { throw new Error('browserType.launch: Executable doesn\'t exist\nmore lines'); } });
+  check('token reader failure stops the run with a named reason',
+    !tokThrows.ok && /^token step "token": browserType\.launch: Executable doesn't exist$/.test(tokThrows.stoppedReason || ''), tokThrows.stoppedReason);
+
   // 6. A discovered token flows into the run and its origin is reported.
   const withTok = await run(authSpec, { [pname]: '84121' },
     { readToken: async () => ({ bearer: 'stub-bearer-value-long-enough', source: 'localStorage.auth → access_token' }) });
   check('discovered token completes the run and names its source',
     withTok.ok && withTok.steps.some((s) => s.type === 'browser-token' && /localStorage\.auth/.test(s.detail)),
     withTok.stoppedReason ?? JSON.stringify(withTok.steps));
+  // 7. The outcome gate generalises: any top-level status-shaped field with a
+  // code-shaped value, not one site's field name; a per-query status word
+  // does not qualify, and neither does a status nested in a record.
+  const gate = (resBody) => toSpec(analyse({ ...baseTrace, events: baseTrace.events.map((e) => e.kind === 'net' ? { ...e, resBody } : e) }),
+    { name: 'g', origin: MOCK, loadUrl: `${MOCK}/`, probeStatus: 200 }).outcome.expect;
+  check('status gate: Status_Code 200 is the gate', JSON.stringify(gate('{"Status_Code":200,"RECORDS":[{"a":1}]}')) === '{"path":"Status_Code","equals":"200"}');
+  check('status gate: success true is the gate', JSON.stringify(gate('{"success":true,"RECORDS":[{"a":1}]}')) === '{"path":"success","equals":"true"}');
+  check('status gate: a status word that varies per query falls back to HTTP', gate('{"status":"found","RECORDS":[{"a":1}]}').path === '__http_ok');
+  check('status gate: a status inside a record is not the gate', gate('{"RECORDS":[{"status":200}]}').path === '__http_ok');
+
+  // 8. The script lint blocks the recorded value as data, and only as data:
+  // an ordinary word typed as the value may still appear as a property, a
+  // query-string key or a JSON field name.
+  const script = `async function run(ctx) { const q = ctx.inputs.query; const r = await ctx.http.fetch('https://x/api?name=' + encodeURIComponent(q), { body: '{"list": true}' }); return r.json().list.map((x) => ({ name: x.name })); }`;
+  check('lint: an ordinary word as the value passes when used as a key or property',
+    lintScript(script, { query: 'name' }).length === 0 && lintScript(script, { query: 'list' }).length === 0,
+    JSON.stringify([lintScript(script, { query: 'name' }), lintScript(script, { query: 'list' })]));
+  check('lint: the value hard-coded as data is rejected',
+    /appears literally/.test(lintScript(script.replace("'https://x/api?name=' + encodeURIComponent(q)", "'https://x/api?name=bank'"), { query: 'bank' }).join(' ')));
+  check('lint: the value inside a JSON body string is rejected',
+    /appears literally/.test(lintScript(`async function run(ctx) { void ctx.inputs.query; return ctx.http.fetch('https://x', { body: '{"q": "bank"}' }); }`, { query: 'bank' }).join(' ')));
+  check('lint: a partial-word match does not trip',
+    lintScript(`async function run(ctx) { void ctx.inputs.query; return ctx.http.fetch('https://x/embankment'); }`, { query: 'bank' }).length === 0);
+  check('lint: an identifier is not a literal',
+    lintScript(`async function run(ctx) { const bank = ctx.inputs.query; return [{ bank }]; }`, { query: 'bank' }).length === 0);
+  check('lint: a script that ignores the input is rejected',
+    /never reads inputs\.query/.test(lintScript('async function run(ctx) { return [{ a: 1 }]; }', { query: 'bank' }).join(' ')));
 } finally {
   mock.kill();
 }

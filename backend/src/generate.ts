@@ -2,7 +2,7 @@ import { compositeMatches, embeddedTokenRegex, leaves, markKey, markMatches, obj
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 12;
+export const SPEC_VERSION = 13;
 
 export type Spec = {
   version: number;
@@ -92,8 +92,15 @@ function embedTemplatise(body: unknown, embeds: { token: string; name: string; v
   return walk(body);
 }
 
-function paramName(field: string): string {
-  return /name|cr_|query|search|term/i.test(field) ? field.replace(/[^\w]/g, '_') : 'query';
+// The parameter takes the field's own id when that id reads like a name a
+// person chose (letters first, three characters or more, no generated
+// numeric suffix such as "input-3" or "mat-input-0", not a generic word).
+// Anything else becomes "query". Shared with the repair loop so a script and
+// a deterministic spec name the same parameter for the same field.
+export function paramName(field: string): string {
+  const id = field.replace(/[^\w]/g, '_');
+  const chosen = /^[A-Za-z]/.test(id) && id.length >= 3 && !/[_-]?\d+$/.test(id) && !/^(field|input|text|textbox|value)$/i.test(id);
+  return chosen ? id : 'query';
 }
 
 // One parameter per distinct typed value found in the outcome call. A value
@@ -118,12 +125,21 @@ function paramGroups(matches: Match[]): ParamGroup[] {
   return groups;
 }
 
-// The response field that gates success: prefer an explicit status field, else
-// the record-count field the analysis already located.
+// The response field that gates success: a top-level field named like a
+// status whose recorded value looks like a code or a verdict (200, true,
+// "ok"), else the HTTP status. A status word that varies per query
+// ("found") would fail an empty search, so only code-shaped values qualify.
+const STATUS_KEY = /^(status_?code|status|success|ok)$/i;
+const STATUS_VALUE = /^(\d{3}|ok|success|true)$/i;
 function outcomeExpectation(call: Call): { path: string; equals: string } {
   const parsed = JSON.parse(call.resBody ?? '{}');
-  if (parsed && typeof parsed === 'object' && 'Status_Code' in parsed) {
-    return { path: 'Status_Code', equals: String((parsed as any).Status_Code) };
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!STATUS_KEY.test(key)) continue;
+      if ((typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string') && STATUS_VALUE.test(String(value))) {
+        return { path: key, equals: String(value) };
+      }
+    }
   }
   return { path: '__http_ok', equals: 'true' };
 }

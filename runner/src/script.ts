@@ -268,6 +268,21 @@ export async function runScript(source: string, options: ScriptOptions): Promise
   }
 }
 
+// The string literals of a script: the only place a hard-coded value can
+// hide. Property names, identifiers and comments are not data.
+function stringLiterals(source: string): string[] {
+  return [...source.matchAll(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g)].map((m) => m[0].slice(1, -1));
+}
+
+// Does a literal carry the recorded value as data? The value must stand as a
+// whole token (so "art" never trips on "smart"), and not in key position:
+// a value that happens to be an ordinary word ("name", "list") is still
+// allowed as a query-string key or a JSON field name inside the literal.
+export function literalCarries(literal: string, value: string): boolean {
+  const esc = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}_])${esc}(?![\\p{L}\\p{N}_])(?!["']?\\s*[=:])`, 'iu').test(literal);
+}
+
 // Static rails checked before a script is ever executed: it must take its
 // inputs from ctx.inputs and must not carry the recorded values as literals
 // — a script that "works" by hard-coding the demonstration is not an
@@ -277,11 +292,12 @@ export function lintScript(source: string, inputs: Record<string, string>): stri
   if (/\b(require|import)\s*\(/.test(source) || /^\s*import\s/m.test(source)) problems.push('the script must not import or require modules');
   // page.eval is the page handle's own method; a bare eval( is the sandbox's.
   if (/\bprocess\b|\bglobalThis\b|(^|[^.\w])eval\s*\(/.test(source)) problems.push('the script must not reference process, globalThis or eval');
+  const literals = stringLiterals(source);
   for (const [name, value] of Object.entries(inputs)) {
     if (!new RegExp(`inputs(\\.${name}\\b|\\[["'\`]${name}["'\`]\\])`).test(source)) {
       problems.push(`the script never reads inputs.${name} — every run's typed value must drive the automation`);
     }
-    if (value.length >= 3 && source.toLowerCase().includes(value.toLowerCase())) {
+    if (value.length >= 3 && literals.some((lit) => literalCarries(lit, value))) {
       problems.push(`the recorded value "${value}" appears literally in the script — use inputs.${name} instead`);
     }
   }

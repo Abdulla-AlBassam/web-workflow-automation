@@ -126,9 +126,14 @@ export async function run(spec: Spec, params: Record<string, string>, deps: RunD
 
   for (const step of spec.steps) {
     if (step.type === 'browser-token') {
-      const tok = await deps.readToken(step.loadUrl).catch((e) => {
-        throw new Error(`token step: ${e.message}`);
-      });
+      // A browser that fails to launch or load is a stop with a reason, like
+      // every other failure here; it must never surface as a server error.
+      let tok: Awaited<ReturnType<TokenReader>>;
+      try {
+        tok = await deps.readToken(step.loadUrl);
+      } catch (e) {
+        return { ok: false, stoppedReason: `token step "${step.id}": ${(e as Error).message.split('\n')[0]}`, steps };
+      }
       if (!tok) {
         return { ok: false, stoppedReason: `token step "${step.id}": site issued no recognisable token after loading ${step.loadUrl}`, steps };
       }
@@ -154,9 +159,12 @@ export async function run(spec: Spec, params: Record<string, string>, deps: RunD
         pageUrl = followed.url;
         linkNote = followed.note;
       }
-      const got = await deps.extractPage(pageUrl, step.extracts.map((e) => e.selector)).catch((e) => {
-        throw new Error(`extract step: ${e.message}`);
-      });
+      let got: Awaited<ReturnType<PageExtractor>>;
+      try {
+        got = await deps.extractPage(pageUrl, step.extracts.map((e) => e.selector));
+      } catch (e) {
+        return { ok: false, stoppedReason: `extract step "${step.id}": ${(e as Error).message.split('\n')[0]}`, steps };
+      }
       const missing = step.extracts.find((_, i) => got.texts[i] === undefined);
       if (missing) {
         return { ok: false, stoppedReason: `extract step "${step.id}": nothing at selector "${missing.selector}" on ${pageUrl} — the page no longer matches the recording`, steps };

@@ -27,7 +27,9 @@ async function waitFor(url, ms = 8000) {
 
 const dataDir = join(root, 'backend/data');
 const profileDir = mkdtempSync(join(tmpdir(), 'wfr-live-'));
-const backend = spawn('npx', ['tsx', 'backend/src/server.ts'], {
+// The backend is spawned as node itself, not through npx: killing an npx
+// wrapper leaves its child running and the next suite finds the port busy.
+const backend = spawn(process.execPath, ['--import', 'tsx', 'backend/src/server.ts'], {
   cwd: root, env: { ...process.env, DATA_DIR: dataDir }, stdio: 'inherit',
 });
 

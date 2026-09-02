@@ -9,7 +9,7 @@
 // deterministic code decides. Nothing unverified ever becomes a spec.
 import Anthropic from '@anthropic-ai/sdk';
 import { analyse, leaves, markKey, objectHasMark, type Analysis } from './analyse.js';
-import { SPEC_VERSION, type Spec } from './generate.js';
+import { SPEC_VERSION, paramName, type Spec } from './generate.js';
 import type { RunResult } from '../../runner/src/run.js';
 import type { Bearer } from '../../runner/src/browser-token.js';
 import { SCRIPT_FILE, getMeta, getScript, getSpec, readEvents, saveMeta, saveScript, saveSpec, status } from './store.js';
@@ -140,16 +140,14 @@ function overview(events: Record<string, unknown>[], a: Analysis): string {
   return lines.join('\n');
 }
 
-// Parameter names for the typed inputs, one per distinct value; field names
-// that look like search fields keep their name, the rest become "query".
+// Parameter names for the typed inputs, one per distinct value, by the
+// generator's own rule (see paramName).
 function paramNames(a: Analysis): { name: string; value: string; field: string }[] {
   const out: { name: string; value: string; field: string }[] = [];
   const used = new Set<string>();
   for (const i of a.inputs) {
     if (out.some((o) => o.value === i.value)) continue;
-    // Same rule as the generator, so a script and a deterministic spec name
-    // the same parameter for the same field.
-    const base = (/name|cr_|query|search|term/i.test(i.field) ? i.field.replace(/[^\w]/g, '_') : 'query').replace(/^(\d)/, '_$1');
+    const base = paramName(i.field);
     let name = base;
     for (let n = 2; used.has(name); n++) name = `${base}_${n}`;
     used.add(name);
