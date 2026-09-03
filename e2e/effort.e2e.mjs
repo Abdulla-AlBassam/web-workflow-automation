@@ -824,6 +824,15 @@ try {
     afterImport.includes('session script (automation.mjs, hosts 127.0.0.1)') && afterImport.includes('built by external in import mode') &&
     afterImport.includes('--- current script ---') && afterImport.includes('ctx.inputs.query'),
     afterImport.match(/### The automation this session already has[\s\S]{0,300}/)?.[0]);
+
+  // === Automation fold: a script's marks were checked at acceptance ==========
+  // The amber "marks unmatched" chip is the deterministic generator's verdict
+  // on its columns; a script automation saved with its marks located must
+  // not wear it.
+  const headerPage = await fetch(`${BACKEND}/session/header`).then((r) => r.text());
+  check('a script automation whose marks were located shows no unmatched-marks chip',
+    headerPage.includes('external model') && !headerPage.includes('marks unmatched') && !/\d+\/\d+ marks/.test(headerPage) && scriptsCompile(headerPage) === '',
+    headerPage.match(/<span class="chip[^>]*>[^<]*marks[^<]*<\/span>/g)?.join(' ') ?? scriptsCompile(headerPage));
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

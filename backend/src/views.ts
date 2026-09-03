@@ -572,15 +572,18 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
     : '<span class="chip chip-ok">direct requests</span>');
   if (spec.repaired) chips.push(`<span class="chip">${spec.repaired.mode === 'import' ? 'external model' : spec.repaired.mode === 'effort' ? 'maximum effort' : spec.repaired.mode === 'refine' ? 'LLM refined' : 'LLM built'}</span>`);
   if (scriptStep?.robots?.length) chips.push('<span class="chip chip-warn">robots.txt</span>');
-  if (marksCount && !spec.outcome.columns?.length) chips.push('<span class="chip chip-warn">marks unmatched</span>');
-  else if (marksCount && spec.outcome.columns?.length && spec.outcome.columns.length < marksCount) chips.push(`<span class="chip chip-warn num">${spec.outcome.columns.length}/${marksCount} marks</span>`);
+  // A script's rows were checked against the marks when it was accepted;
+  // only a deterministic spec can leave a mark unmatched.
+  const unmatched = marksCount && !scriptStep ? (spec.outcome.columns?.length ?? 0) : marksCount;
+  if (marksCount && !unmatched) chips.push('<span class="chip chip-warn">marks unmatched</span>');
+  else if (marksCount && unmatched < marksCount) chips.push(`<span class="chip chip-warn num">${unmatched}/${marksCount} marks</span>`);
 
   // "?": clarifications this particular automation generated.
   const clarifications: string[] = [];
   for (const s of reasoned) clarifications.push(`<p>${esc(s.reason)}</p>`);
   for (const r of scriptStep?.robots ?? []) clarifications.push(`<p>${esc(r)}</p>`);
-  if (marksCount && !spec.outcome.columns?.length) clarifications.push('<p>Your marked text was not found in any captured API response (it may be rendered server-side), so results show all fields instead.</p>');
-  if (marksCount && spec.outcome.columns?.length && spec.outcome.columns.length < marksCount) clarifications.push(`<p>Only ${spec.outcome.columns.length} of ${marksCount} marked selections could be located; the rest were not found where the outcome lives.</p>`);
+  if (marksCount && !unmatched) clarifications.push('<p>Your marked text was not found in any captured API response (it may be rendered server-side), so results show all fields instead.</p>');
+  if (marksCount && unmatched && unmatched < marksCount) clarifications.push(`<p>Only ${unmatched} of ${marksCount} marked selections could be located; the rest were not found where the outcome lives.</p>`);
   const qPill = clarifications.length ? pill('q', clarifications.join(''), 'Notes about this automation', true) : '';
 
   const provenance = spec.repaired?.mode === 'import'
