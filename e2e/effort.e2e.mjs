@@ -833,6 +833,14 @@ try {
   check('a script automation whose marks were located shows no unmatched-marks chip',
     headerPage.includes('external model') && !headerPage.includes('marks unmatched') && !/\d+\/\d+ marks/.test(headerPage) && scriptsCompile(headerPage) === '',
     headerPage.match(/<span class="chip[^>]*>[^<]*marks[^<]*<\/span>/g)?.join(' ') ?? scriptsCompile(headerPage));
+
+  // === What the export pill promises =========================================
+  // The operator decides whether to hand the brief to a model from this copy,
+  // so it must name what the export does on their behalf.
+  const pillPage = await fetch(`${BACKEND}/session/byom`).then((r) => r.text());
+  check('the export pill says the calls are replayed uncredentialed and a header row is ignored',
+    pillPage.includes('It replays the calls that carried what you typed, without credentials, so the model is told which of them are gated, and a table header row marked by mistake is listed as ignored.'),
+    pillPage.match(/<p>The export also fetches[\s\S]{0,600}?<\/p>/)?.[0] ?? 'the About the export pill is not on the page');
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

@@ -27,17 +27,20 @@ element's markup, select choices with the option's visible text, forms as
 submitted (method, action and named fields, so a classic POST form is not
 lost to the network tap), navigations, text the operator highlights, and
 every fetch/XHR request the page makes with its request and response
-bodies and headers, whatever host it goes to. It also keeps snapshots of
-the pages the operator looked at: the visible text, a pruned copy of the
-DOM (no scripts, styles, handlers or media) and the names of the page's
-web storage keys, taken when a page settles, after an action or a response
-changed it, and when recording stops. For a site that renders its results
-into the page, the snapshot is the only record of the outcome. Bodies are
-kept up to 2 MB, snapshots up to 600 KB of HTML; a longer one is cut and
-the cut is declared. Cookies, `Authorization` and `Set-Cookie` headers,
-password values and hidden form values are stripped in the extension and
-again in the backend. Events stream to a local Fastify backend as they
-happen.
+bodies and headers, whatever host it goes to. A field that fires no change
+event, a contenteditable box or a custom combobox, is read once typing
+pauses. It also keeps snapshots of the pages the operator looked at: the
+visible text, a pruned copy of the DOM (no scripts, styles, handlers or
+media) and the names of the page's web storage keys, taken when a page
+settles, after an action or a response changed it, and when recording
+stops. For a site that renders its results into the page, the snapshot is
+the only record of the outcome. Bodies are kept up to 2 MB and snapshots
+up to 600 KB of HTML, 40 of them a session; a longer one is cut and the
+cut is declared. Page loads, pages left and the final state are never
+dropped, and what the cap dropped is counted on the session page and in
+the brief. Cookies, auth headers, password values and hidden form values
+are stripped in the extension and again in the backend. Events stream to a
+local Fastify backend as they happen.
 
 Analyse (`backend/src/analyse.ts`). Deterministic, no model. Each typed
 value is searched for in every request: JSON and form bodies, URLs in raw,
@@ -53,11 +56,11 @@ steps that reproduce the outcome. Step types: `request` (the default),
 `browser-token` (added only when the unauthenticated probe fails; at run
 time it loads the site and finds the anonymous bearer in web storage by
 shape), a chained `request` with a `link`, `browser-extract` for
-server-rendered pages, and `script` for a program the LLM assistant wrote
-for one session. A page number in the request body or the query string,
-paired with a total in the response, turns on fetch-all pagination. Marked
-values become named columns. Specs carry a
-version and regenerate when the generator changes.
+server-rendered pages, and `script` for a program a model wrote for one
+session. A page number in the request body or the query string, paired
+with a total in the response, turns on fetch-all pagination. Marked values
+become named columns. Specs carry a version and regenerate when the
+generator changes.
 
 Execute (`runner/`). The runner takes a spec and new inputs, runs the steps,
 checks the outcome against what the recording promised, and stops with a
@@ -109,6 +112,13 @@ on the real site.
 - Custom request headers the page set (an app id, a vendor `accept`).
   They are replayed, and the auth probe sends them too, so a 403 caused by
   a missing header is never mistaken for a missing bearer. Suite only.
+- Typed values the page never reports. A contenteditable box and a custom
+  combobox fire no change event, so the value is read once typing pauses
+  and deduped against the event an ordinary input does fire. Suite only.
+- Forms submitted from script and controls inside an open shadow root.
+  `form.submit()` fires no submit event, so the form is described from its
+  fields; a shadow control retargets its events to its host, so the
+  composed path names the control itself. Suite only.
 - Forms with several fields: one parameter each.
 - Two-step lookups, search then detail, re-resolved per input. Live:
   wwe.com.
@@ -128,13 +138,16 @@ below says which layer it lands on and how the recovery was checked.
 
 The pipeline refuses; the assistant can recover:
 
-- JSONP and script-tag traffic. Only the URL is recorded; the assistant
-  probes the plain-JSON form. Live: Wikipedia portal.
+- JSONP and script-tag traffic. A script tag is neither fetch nor XHR, so
+  only its URL is recorded; the brief fetches the ones that carried a typed
+  value, so the model sees the JSONP shape and drops `callback=`. Live:
+  Wikipedia portal.
 - Responses over 2 MB. Cut and declared; the assistant fetches them in
   full. Live: Nominatim.
-- Server-rendered result lists. The assistant drives a browser page and
-  reads the list, or finds the JSON the page can be asked for. Live: UK
-  Companies House.
+- Server-rendered result lists. The brief says whether a plain fetch of
+  each visited page still carries the results the operator saw, so the
+  script parses that HTML with `ctx.dom` and opens a browser page only
+  where nothing else reaches the data. Live: UK Companies House.
 - Nothing typed but something marked. The assistant derives a
   zero-parameter automation from the marks. Suite only.
 - Values transformed before sending (a date as an epoch, a choice as an
@@ -142,7 +155,27 @@ The pipeline refuses; the assistant can recover:
 
 Neither layer:
 
-- WebSockets and cross-origin iframes. Not captured.
+- WebSockets, and anything inside an iframe. A socket's messages pass
+  neither the fetch nor the XHR tap. The recorder runs in the top frame by
+  decision, so typed values, clicks, marks and snapshots come from it alone
+  and a frame's own fetch or XHR is captured nowhere, though its document
+  load still shows up as metadata; a cross-origin frame could not be read
+  in any case, and same-origin result frames are rare on public search
+  pages.
+- A CSS selector for a control inside a shadow root. The recorder names the
+  control itself, its tag, id and text, but the selector stops at the
+  shadow boundary, so a browser step cannot address it and a closed root
+  shows only its host; text highlighted inside one cannot be marked at all,
+  because Chromium's selection API does not report it. The suite records
+  such a search and replays it through the request the control fired, which
+  needs no selector.
+- The exact body a navigating form sent. A classic POST reaches neither the
+  network tap nor `webRequest`'s body, so the recorder rebuilds it from the
+  form's own fields and names a hidden field without its value: a token or
+  a nonce appears as a requirement, never as data. The suite records such a
+  submit with its method, action and fields, and the deterministic pipeline
+  still refuses a form-driven session; the reconstruction is there for the
+  model to work from.
 - Per-request signing, nonces, CSRF tokens. No direct call can be
   generated. A browser-driven script might work; not exercised. Sijilat's
   reusable anonymous token is not signing and is handled.
@@ -305,10 +338,10 @@ docs/        Spec format, site evidence, UI rules
 
 ```bash
 npm run e2e                # record to replay in real Chromium (stop the backend first)
-npm run test:failures      # every named stop
-npm run test:enhancements  # pagination, bulk, URL specs, chains, marks
-npm run test:matrix        # eight site shapes recorded end to end in real Chromium
+npm run test:failures      # every named stop, the script sandbox, robots.txt and .env
+npm run test:enhancements  # pagination in body and URL, bulk, chains, marks, snapshot cap
+npm run test:matrix        # eleven site shapes recorded end to end in real Chromium
 npm run test:repair        # adjust loop against a scripted mock model
-npm run test:effort        # Maximum Effort Mode against a scripted mock model and a rendered shop
+npm run test:effort        # Maximum Effort Mode, the brief and its budget, verdicts and refusals
 npm run typecheck
 ```

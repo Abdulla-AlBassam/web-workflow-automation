@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 16,
   "name": "sijilat-cr-search",
   "origin": "https://www.sijilat.bh",
   "language": "EN",
@@ -15,9 +15,7 @@
       "id": "token",
       "type": "browser-token",
       "loadUrl": "https://www.sijilat.bh/public-search-cr/search-cr-2.aspx",
-      "readToken": "localStorage.accessToken",
-      "bearerPath": "access_token",
-      "reason": "direct call needs a bearer token (probe returned 401); the site issues one client-side for anonymous users"
+      "reason": "direct call needs a bearer token (probe returned 401); the site issues one client-side, read back from its web storage"
     },
     {
       "id": "search",
@@ -25,8 +23,8 @@
       "method": "POST",
       "url": "https://api.sijilat.bh/api/CRdetails/AdvanceSearchCR_Paging",
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "accept": "*/*"
+        "accept": "*/*",
+        "content-type": "application/json; charset=utf-8"
       },
       "bearerFrom": "token",
       "bodyTemplate": {
@@ -170,6 +168,9 @@
     "extract": {
       "records": "jsonData.CR_list",
       "total": "jsonData.Total_Records"
+    },
+    "pagination": {
+      "pagePath": "PaginationParams.Page"
     }
   }
 }

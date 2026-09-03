@@ -1,6 +1,6 @@
 # Sijilat — live-site evidence
 
-Captured by direct inspection on 2026-08-29. Re-verify anything load-bearing before relying on it; the site can change.
+Captured by direct inspection on 2026-08-29; the load-bearing facts (search page served plainly, API 401 without a bearer, the anonymous token minted into web storage) re-verified live on 2026-09-03. Re-verify before relying on any of it; the site can change.
 
 ## Public CR search
 
@@ -19,11 +19,11 @@ Captured by direct inspection on 2026-08-29. Re-verify anything load-bearing bef
 
 - The API requires `Authorization: Bearer <token>`. Body-only replay returns **401**. `sha256.js` is not request signing; it derives the token password.
 - The token is anonymous and public: the page runs `tokenRequest("sijilat_test")` (`/js/config.js`), which POSTs `endPoint + "/token"` with `grant_type=password`, `username=sijilat`, `password=HMAC-SHA256(key, "sijilat_test")` where `key` is a constant baked into the public JS. The token is cached in `localStorage.accessToken` with an `expirey_date`. Every anonymous visitor gets one automatically; it is not a user credential.
-- **Runner strategy:** do not reproduce the HMAC/password step. Load the origin page in Playwright, let the site mint its own token, read `localStorage.accessToken`, then make the one direct search call with that bearer. The runner never handles the password. This is the "one browser step first" the proposal anticipated.
+- **Runner strategy:** do not reproduce the HMAC/password step. Load the origin page in Playwright, let the site mint its own token, and read it back from web storage, then make the one direct search call with that bearer. The reader is generic (any JWT-shaped value or token-named field in web storage; it reports where it found one) and on this site finds `localStorage.accessToken`. The runner never handles the password. This is the "one browser step first" the proposal anticipated.
 
 ## Noise to filter
 
-Third-party traffic present on every page (drop at capture via allowlist): Genesys chat (`apps.mypurecloud.de`, 4-5 iframes), AddThis, Moat ads, AppDynamics (`adrum`), Dynatrace (`ruxit`). The chat iframes mean frame-aware capture must ignore cross-origin frames.
+Third-party traffic present on every page: Genesys chat (`apps.mypurecloud.de`, 4-5 iframes), AddThis, Moat ads, AppDynamics (`adrum`), Dynatrace (`ruxit`). Capture keeps every http(s) host and ranks the outcome call by the typed value, so this traffic is recorded and ignored rather than filtered; the recorder reads the top frame only, so the chat iframes contribute nothing but their document loads.
 
 ## Behaviour notes
 

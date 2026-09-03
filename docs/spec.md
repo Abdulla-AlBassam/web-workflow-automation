@@ -4,7 +4,7 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
 
 ```jsonc
 {
-  "version": 6,
+  "version": 16,
   "name": "sijilat-cr-search",
   "origin": "https://www.sijilat.bh",
   "language": "EN",                     // recorded UI language; the runner sets it explicitly
