@@ -50,8 +50,10 @@ function bodyToString(body: unknown): string | undefined {
 // The headers the page's own code set on the request, lowercased. Browser-
 // managed ones (host, origin, user-agent, cookie) never appear on a Request
 // object and are not settable on an XHR, so what is captured is exactly what
-// a replay must send. Credential-shaped names are dropped here, and again by
-// the recorder and the backend.
+// a replay must send. Response headers are kept the same way (pagination
+// links, totals and rate limits live there); set-cookie never passes.
+// Credential-shaped names are dropped here, and again by the recorder and
+// the backend.
 const CREDENTIAL_HEADER = /cookie|authorization|x-api-key|bearer/i;
 
 function headersOf(entries: Iterable<[string, string]>): Record<string, string> | undefined {
@@ -88,10 +90,12 @@ window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
     try { resBody = await res.clone().text(); } catch { /* stream already locked */ }
     const rq = cap(reqBody, REQ_CAP);
     const rs = cap(resBody, RES_CAP);
+    const resHeaders = headersOf(res.headers.entries());
     emit({
       api: 'fetch', method: req.method, url: req.url, status: res.status,
       contentType: res.headers.get('content-type'),
       ...(reqHeaders ? { reqHeaders } : {}),
+      ...(resHeaders ? { resHeaders } : {}),
       reqBody: rq.body, resBody: rs.body,
       ...(rq.total ? { reqTruncated: rq.total } : {}), ...(rs.total ? { resTruncated: rs.total } : {}),
       started, ended: Date.now(),
@@ -127,10 +131,12 @@ XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyIn
       } catch { /* responseType forbids text access */ }
       const rq = cap(info.reqBody, REQ_CAP);
       const rs = cap(resBody, RES_CAP);
+      const resHeaders = headersOf(this.getAllResponseHeaders().split('\r\n').filter((l) => l.includes(':')).map((l) => { const i = l.indexOf(':'); return [l.slice(0, i), l.slice(i + 1).trim()] as [string, string]; }));
       emit({
         api: 'xhr', method: info.method, url: new URL(info.url, location.href).href,
         status: this.status, contentType: this.getResponseHeader('content-type'),
         ...(reqHeaders ? { reqHeaders } : {}),
+        ...(resHeaders ? { resHeaders } : {}),
         reqBody: rq.body, resBody: rs.body,
         ...(rq.total ? { reqTruncated: rq.total } : {}), ...(rs.total ? { resTruncated: rs.total } : {}),
         started: info.started, ended: Date.now(),

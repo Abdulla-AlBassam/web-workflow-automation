@@ -6,6 +6,8 @@ export type Meta = {
   name?: string;
   // What the operator asked Maximum Effort Mode for, kept with the session.
   goal?: string;
+  // When a brief was last exported for an external model.
+  briefAt?: number;
   hosts: string[];
   startedAt: number;
   stoppedAt?: number;
@@ -21,8 +23,20 @@ const metaPath = (session: string) => join(dir(session), 'meta.json');
 const eventsPath = (session: string) => join(dir(session), 'events.jsonl');
 const specPath = (session: string) => join(dir(session), 'spec.json');
 
+export function sessionDir(session: string): string {
+  return dir(session);
+}
+
 // Session scripts (runner/src/script.ts) live beside the spec that names them.
 export const SCRIPT_FILE = 'automation.mjs';
+
+// The brief for an external model, written beside the recording it describes
+// so an agent pointed at the folder finds the prompt and the evidence together.
+export const BRIEF_FILE = 'BRIEF.md';
+
+export function saveBrief(session: string, markdown: string) {
+  writeFileSync(join(dir(session), BRIEF_FILE), markdown);
+}
 
 export function saveScript(session: string, file: string, source: string) {
   writeFileSync(join(dir(session), file), source);

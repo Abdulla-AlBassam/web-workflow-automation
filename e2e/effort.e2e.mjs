@@ -6,11 +6,15 @@
 // that bakes in a typed value or returns rows the operator never saw,
 // accepts one that reproduces the final page, saves it with the declared
 // parameters and the goal, replays it for new inputs, keeps the
-// conversation on disk, and stops when told.
+// conversation on disk, and stops when told. Then the bring-your-own-model
+// route: the exported brief carries the whole recording within a budget,
+// an answer pasted back is held to the same acceptance (page route and
+// CLI), and the site's robots.txt is reported, never enforced.
 // Run: node e2e/effort.e2e.mjs
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+
 import { tmpdir } from 'node:os';
 import { Script } from 'node:vm';
 import { join } from 'node:path';
@@ -60,6 +64,7 @@ function listing(q, min) {
 }
 const site = createServer((req, res) => {
   const url = new URL(req.url, SITE);
+  if (url.pathname === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('User-agent: *\nDisallow: /shop\nDisallow: /private/\n'); return; }
   res.writeHead(200, { 'content-type': 'text/html' });
   if (url.pathname === '/shop') { res.end(listing(url.searchParams.get('q') ?? '', Number(url.searchParams.get('min') ?? 0))); return; }
   res.end('<html><body><h1>Shop</h1><form><input id="search" aria-label="Search"></form></body></html>');
@@ -68,7 +73,9 @@ site.listen(SITE_PORT);
 
 // What the recorder would have captured on those pages: visible text and the
 // pruned DOM (no script tag).
-const textOf = (html) => html.replace(/<script>[\s\S]*?<\/script>/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+// innerText puts each block on its own line; the fixture's text must too,
+// or the brief's fetch check has nothing line-shaped to look for.
+const textOf = (html) => html.replace(/<script>[\s\S]*?<\/script>/g, '').replace(/<\/(li|h1|p|form)>/g, '\n').replace(/<[^>]+>/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
 const domOf = (html) => html.replace(/<script>[\s\S]*?<\/script>/g, '').replace(/<!doctype html><html><body>|<\/body><\/html>/g, '');
 
 // --- mock model ------------------------------------------------------------------
@@ -90,6 +97,9 @@ const UNSEEN = `async function run(ctx) {
   return [{ id: 'row-' + res.status }];
 }`;
 const PARAMS = [{ name: 'query', example: 'hub', description: 'search text' }, { name: 'min_price', example: '50' }];
+// The same script under the generator's own names (search, min): what a
+// bare script without a JSON block is held to.
+const PLAIN = GOOD.replace('ctx.inputs.query', 'ctx.inputs.search').replace('ctx.inputs.min_price', 'ctx.inputs.min');
 
 const scripts = [
   // --- shop: read the last page, ask, get the answer, think, probe, fail lint, succeed, report.
@@ -295,6 +305,101 @@ try {
   check('the pack showed the route, the snapshots and the typed labels',
     pack.includes('same page, query changed: min=50 sort=new') && pack.includes('#12 (stop)') && pack.includes('label="Minimum price"') &&
     pack.includes(GOAL) && JSON.stringify(llmRequests[0].tools).includes('read_snapshot'), pack.slice(0, 1500));
+
+  // Scenario 3: bring your own model. The brief carries the goal, the rules,
+  // the answer format and the evidence; a budget cuts and says so; the
+  // answer pasted back passes the same acceptance as the loop, by page route
+  // and by CLI; robots.txt is reported on the saved automation.
+  const noise = JSON.stringify(Array.from({ length: 900 }, (_, i) => ({ id: i, name: `noise item ${i}`, note: 'x'.repeat(80) })));
+  const byomEvents = shopEvents();
+  byomEvents.splice(-1, 0, { kind: 'net', method: 'GET', url: `${SITE}/api/noise`, status: 200, contentType: 'application/json', resHeaders: { 'x-total-count': '900' }, resBody: noise, seq: 13 });
+  byomEvents[byomEvents.length - 1].seq = 14;
+  const byomStop = await record('byom', byomEvents);
+  check('byom: refused deterministically before any brief', byomStop.spec === false);
+  const fresh = await fetch(`${BACKEND}/session/byom`).then((r) => r.text());
+  check('byom: paste box hidden until a brief exists', fresh.includes('id="import-block" hidden') && fresh.includes('Export brief') && fresh.includes('Chat-sized'));
+
+  const briefRes = await fetch(`${BACKEND}/api/sessions/byom/brief`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ goal: GOAL }) });
+  const brief = await briefRes.text();
+  check('brief: served as a markdown download', briefRes.status === 200 && /text\/markdown/.test(briefRes.headers.get('content-type') ?? '') && /filename="byom-brief.md"/.test(briefRes.headers.get('content-disposition') ?? ''), `${briefRes.status} ${briefRes.headers.get('content-type')}`);
+  check('brief: goal, contract, acceptance rules and answer format',
+    brief.includes(`## Goal\n\n${GOAL}`) && brief.includes('ctx.dom(html)') && brief.includes('## Acceptance') && brief.includes('"source": "async function run(ctx) { ... }"') && brief.includes('npm run verify -- byom'));
+  check('brief: route, typed values with labels and suggested names, analyser verdict flagged',
+    brief.includes('same page, query changed: min=50 sort=new') && /"50" into .*\(label "Minimum price"\) → suggested parameter name `min`/.test(brief) && brief.includes('(a guess'), brief.match(/### Values the operator typed[\s\S]{0,300}/)?.[0]);
+  check('brief: every snapshot text in full and the last page HTML',
+    brief.includes('### Snapshot #6 (load)') && brief.includes('### Snapshot #12 (stop)') && brief.includes('CalDigit Element Hub $189') && brief.includes('### Snapshot #12 — pruned HTML') && brief.includes('<li class="item">'));
+  check('brief: plain-fetch check says the listing is server-rendered and names the robots rule',
+    /→ HTTP 200 text\/html, \d+ chars; \d+ of \d+ visible lines from the snapshot present → the content is in the plain response/.test(brief) && brief.includes('robots.txt disallows /shop for all agents') && brief.includes('### The last page as a plain fetch returns it'),
+    brief.match(/### What a plain HTTP fetch[\s\S]{0,600}/)?.[0]);
+  check('brief: captured call in full with its response headers, nothing cut at the default budget',
+    brief.includes('#### #13 GET ' + SITE + '/api/noise → 200 application/json') && brief.includes('"x-total-count":"900"') && brief.includes('noise item 899') && brief.includes('Nothing: the whole recording fit'));
+  check('brief: goal persisted, BRIEF.md written, export stamped',
+    readMeta('byom').goal === GOAL && readMeta('byom').briefAt > 0 && existsSync(join(dataDir, 'byom', 'BRIEF.md')) && readFileSync(join(dataDir, 'byom', 'BRIEF.md'), 'utf8') === brief);
+  const small = await fetch(`${BACKEND}/api/sessions/byom/brief?budget=70000&probe=0`).then((r) => r.text());
+  check('brief: a budget cuts the least valuable evidence and says so; probe=0 skips the fetch',
+    small.length <= 70000 && small.includes('## Left out by the budget') && /call #13 GET .*: (cut at|left out entirely)/.test(small) && small.includes('CalDigit Element Hub $189') && small.includes('Not checked (export with ?probe=0'),
+    `${small.length} ${small.match(/## Left out by the budget[\s\S]{0,300}/)?.[0]}`);
+  const exported = await fetch(`${BACKEND}/session/byom`).then((r) => r.text());
+  check('byom: paste box shown once a brief exists and the page scripts parse', exported.includes('<div id="import-block">') && scriptsCompile(exported) === '', scriptsCompile(exported));
+
+  const importAnswer = (text) => fetch(`${BACKEND}/api/sessions/byom/import`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })
+    .then(async (r) => ({ status: r.status, body: await r.json() }));
+  const nothing = await importAnswer('I could not work it out, sorry.');
+  check('import: a reply with no answer in it is refused with instructions', nothing.status === 422 && /REJECTED: no answer found/.test(nothing.body.error), JSON.stringify(nothing.body));
+  const baked = await importAnswer('Here you go:\n```json\n' + JSON.stringify({ title: 'Baked', summary: 's', parameters: [{ name: 'min_price', example: '50' }], fixed: [], source: BAKED }) + '\n```\n');
+  check('import: a baked-in typed value is refused with the loop\'s own wording', baked.status === 422 && /^REJECTED: lint: .*typed value "hub" is hard-coded/.test(baked.body.error), JSON.stringify(baked.body));
+  const bareWrong = await importAnswer('```js\n' + GOOD + '\n```');
+  check('import: a bare script is held to the typed values under the generator\'s names', bareWrong.status === 422 && /never reads inputs\.search/.test(bareWrong.body.error), JSON.stringify(bareWrong.body));
+  const bareOk = await importAnswer(PLAIN);
+  check('import: a bare script that reads them is verified and saved', bareOk.status === 200 && bareOk.body.ok && /^Automation saved — 3 of 3 row\(s\) carry text the operator saw/.test(bareOk.body.text) && JSON.stringify(bareOk.body.parameters) === '["search","min"]', JSON.stringify(bareOk.body));
+  check('import: robots.txt reported, not enforced', bareOk.body.robots?.length === 1 && /robots\.txt on 127\.0\.0\.1:\d+ disallows \/shop for all agents; this automation fetches/.test(bareOk.body.robots[0]) && readSpec('byom').steps[0].robots?.length === 1, JSON.stringify(bareOk.body.robots));
+  const answer = 'Here is the automation.\n\n```json\n' + JSON.stringify({ title: 'Shop Listings BYOM', summary: 'Fetches the listing page for the query and minimum price, newest first, and returns the first three items.', parameters: PARAMS, fixed: [], source: GOOD }, null, 2) + '\n```\n\nIt takes a query and a minimum price.';
+  const good = await importAnswer(answer);
+  check('import: the JSON block inside a whole reply is verified and saved with its title',
+    good.status === 200 && /saved as "Shop Listings BYOM"/.test(good.body.text) && JSON.stringify(good.body.parameters) === '["query","min_price"]', JSON.stringify(good.body));
+  const byomSpec = readSpec('byom');
+  check('import: spec carries external provenance, the goal and the declared parameters',
+    byomSpec.repaired?.mode === 'import' && byomSpec.repaired.model === 'external' && byomSpec.repaired.feedback === GOAL && byomSpec.steps[0].type === 'script' && JSON.stringify(byomSpec.parameters.map((p) => p.name)) === '["query","min_price"]' && readMeta('byom').name === 'Shop Listings BYOM',
+    JSON.stringify({ repaired: byomSpec.repaired, parameters: byomSpec.parameters }));
+  const byomReplay = await api('/api/sessions/byom/run', { params: { query: 'dock', min_price: '100' } });
+  check('import: the saved automation replays new inputs', byomReplay.ok && byomReplay.extracted?.records?.rows?.[0]?.title === 'Dell Universal Dock', byomReplay.stoppedReason ?? JSON.stringify(byomReplay.extracted));
+  const byomLog = readLog('byom');
+  check('import: both outcomes are logged for the page',
+    byomLog.filter((l) => l.kind === 'fail').length === 2 && byomLog.filter((l) => l.kind === 'saved').length === 2 && byomLog.some((l) => l.kind === 'info' && /imported for verification: "Shop Listings BYOM"/.test(l.text)) && !byomLog.some((l) => l.kind === 'start'),
+    JSON.stringify(byomLog.map((l) => l.kind)));
+  const byomPage = await fetch(`${BACKEND}/session/byom`).then((r) => r.text());
+  check('import: session page shows the external provenance, the robots note and the history',
+    byomPage.includes('external model') && byomPage.includes('Built by an external model from the exported brief') && byomPage.includes('robots.txt') && byomPage.includes('disallows /shop for all agents') && byomPage.includes('History · ') && scriptsCompile(byomPage) === '', scriptsCompile(byomPage));
+
+  // The CLI: an agent in the repository verifies its candidate without the
+  // page. Spawned asynchronously: the mini shop it fetches lives in this
+  // process, and a blocking spawn would starve it.
+  const cli = (...args) => new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'backend/src/verify.ts', ...args], { cwd: process.cwd(), env: { ...process.env, DATA_DIR: dataDir } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => (stdout += c));
+    child.stderr.on('data', (c) => (stderr += c));
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+  const folder = join(dataDir, 'byom');
+  writeFileSync(join(folder, 'automation.candidate.mjs'), BAKED);
+  writeFileSync(join(folder, 'candidate.json'), JSON.stringify({ title: 'CLI Listings', summary: 'From the CLI.', parameters: [{ name: 'min_price', example: '50' }], fixed: [] }));
+  const rejected = await cli('byom');
+  check('cli: REJECTED with the reason and exit 1', rejected.status === 1 && /^REJECTED: lint: .*"hub" is hard-coded/m.test(rejected.stdout), `${rejected.status} ${rejected.stdout} ${rejected.stderr}`.slice(0, 400));
+  writeFileSync(join(folder, 'automation.candidate.mjs'), GOOD);
+  writeFileSync(join(folder, 'candidate.json'), JSON.stringify({ title: 'CLI Listings', summary: 'From the CLI.', parameters: PARAMS, fixed: [] }));
+  const passed = await cli('byom');
+  check('cli: PASS with rows, columns, hosts and the robots note, exit 0, nothing saved without --save',
+    passed.status === 0 && /^PASS — 3 of 3 row\(s\)/m.test(passed.stdout) && /columns title, price, link/.test(passed.stdout) && /^note: robots\.txt/m.test(passed.stdout) && /add --save/.test(passed.stdout) && readMeta('byom').name === 'Shop Listings BYOM',
+    `${passed.status} ${passed.stdout} ${passed.stderr}`.slice(0, 400));
+  writeFileSync(join(folder, 'answer.md'), answer.replace('Shop Listings BYOM', 'Answer File'));
+  const saved = await cli('byom', join(folder, 'answer.md'), '--save');
+  check('cli: a whole reply file passes and --save makes it the automation',
+    saved.status === 0 && /saved as the session's automation/.test(saved.stdout) && readSpec('byom').repaired.mode === 'import' && readLog('byom').at(-1).kind === 'saved' && /Answer File/.test(readLog('byom').at(-1).text),
+    `${saved.status} ${saved.stdout} ${saved.stderr}`.slice(0, 400));
+  const usage = await cli();
+  check('cli: usage on no arguments, exit 2', usage.status === 2 && /usage: npm run verify/.test(usage.stderr));
 
   // Scenario 2: rows the operator never saw are refused; give_up ends honestly.
   await record('unseen', shopEvents());

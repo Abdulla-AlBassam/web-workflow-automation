@@ -224,6 +224,7 @@ const IC_PLAYC = '<svg class="t-ic" width="14" height="14" viewBox="0 0 16 16" a
 const IC_SPARK = '<svg class="t-ic" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6l1.5 4.1 4.1 1.5-4.1 1.5L8 12.8 6.5 8.7 2.4 7.2l4.1-1.5z" fill="currentColor"/></svg>';
 const PLAY = '<svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 1.5l8 4.5-8 4.5z" fill="currentColor"/></svg>';
 const DOWNLOAD = '<svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 1.5v7M4 6l3 3 3-3M1.5 11.5h11"/></svg>';
+const TICK = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8.5l3.5 3.5L13.5 4"/></svg>';
 const LOGO = '<svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true"><rect x="0" y="0" width="4" height="4" rx="1" fill="currentColor"/><rect x="5.5" y="0" width="4" height="4" rx="1" fill="currentColor" opacity=".45"/><rect x="11" y="0" width="4" height="4" rx="1" fill="currentColor" opacity=".2"/><rect x="0" y="5.5" width="4" height="4" rx="1" fill="currentColor" opacity=".45"/><rect x="5.5" y="5.5" width="4" height="4" rx="1" fill="currentColor"/><rect x="11" y="5.5" width="4" height="4" rx="1" fill="currentColor" opacity=".45"/><rect x="0" y="11" width="4" height="4" rx="1" fill="currentColor" opacity=".2"/><rect x="5.5" y="11" width="4" height="4" rx="1" fill="currentColor" opacity=".45"/><rect x="11" y="11" width="4" height="4" rx="1" fill="currentColor"/></svg>';
 
 // "i" = fixed explainer for a card; "?" = clarifications this run produced.
@@ -549,18 +550,22 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string)
   chips.push(reasoned.length
     ? `<span class="chip">${reasoned.length} browser step${reasoned.length === 1 ? '' : 's'}</span>`
     : '<span class="chip chip-ok">direct requests</span>');
-  if (spec.repaired) chips.push(`<span class="chip">${spec.repaired.mode === 'effort' ? 'maximum effort' : spec.repaired.mode === 'refine' ? 'LLM refined' : 'LLM built'}</span>`);
+  if (spec.repaired) chips.push(`<span class="chip">${spec.repaired.mode === 'import' ? 'external model' : spec.repaired.mode === 'effort' ? 'maximum effort' : spec.repaired.mode === 'refine' ? 'LLM refined' : 'LLM built'}</span>`);
+  if (scriptStep?.robots?.length) chips.push('<span class="chip chip-warn">robots.txt</span>');
   if (marksCount && !spec.outcome.columns?.length) chips.push('<span class="chip chip-warn">marks unmatched</span>');
   else if (marksCount && spec.outcome.columns?.length && spec.outcome.columns.length < marksCount) chips.push(`<span class="chip chip-warn num">${spec.outcome.columns.length}/${marksCount} marks</span>`);
 
   // "?": clarifications this particular automation generated.
   const clarifications: string[] = [];
   for (const s of reasoned) clarifications.push(`<p>${esc(s.reason)}</p>`);
+  for (const r of scriptStep?.robots ?? []) clarifications.push(`<p>${esc(r)}</p>`);
   if (marksCount && !spec.outcome.columns?.length) clarifications.push('<p>Your marked text was not found in any captured API response (it may be rendered server-side), so results show all fields instead.</p>');
   if (marksCount && spec.outcome.columns?.length && spec.outcome.columns.length < marksCount) clarifications.push(`<p>Only ${spec.outcome.columns.length} of ${marksCount} marked selections could be located; the rest were not found where the outcome lives.</p>`);
   const qPill = clarifications.length ? pill('q', clarifications.join(''), 'Notes about this automation', true) : '';
 
-  const provenance = spec.repaired?.mode === 'effort'
+  const provenance = spec.repaired?.mode === 'import'
+    ? `<p class="ok-note" style="margin:0 0 12px">Built by an external model from the exported brief${spec.repaired.feedback ? ` for: “${esc(spec.repaired.feedback)}”` : ''}. ${esc(spec.repaired.summary ?? spec.repaired.diagnosis)} Verified on import by running it with the recorded input against the pages and calls in the recording before saving.</p>`
+    : spec.repaired?.mode === 'effort'
     ? `<p class="ok-note" style="margin:0 0 12px">Built in Maximum Effort Mode (${esc(spec.repaired.model)})${spec.repaired.feedback ? ` for: “${esc(spec.repaired.feedback)}”` : ''}. ${esc(spec.repaired.summary ?? spec.repaired.diagnosis)} Verified by running it with the recorded input against the pages and calls in the recording before saving.</p>`
     : spec.repaired?.mode === 'refine'
     ? `<p class="ok-note" style="margin:0 0 12px">Refined by the LLM repair assistant (${esc(spec.repaired.model)}) after a run was flagged${spec.repaired.feedback ? ` ("${esc(spec.repaired.feedback)}")` : ''}: ${esc(spec.repaired.diagnosis)} Verified by executing it with the recorded input against the recording's own evidence before saving.</p>`
@@ -835,23 +840,36 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string)
 }
 
 // Maximum Effort Mode, bring-your-own-model shape: the operator states the
-// goal, exports the whole recording as one brief for an external model, and
-// pastes the answer back to be verified against the recording. The export and
-// import controls land with the next build; past API-loop conversations stay
-// readable.
+// goal, exports the whole recording as one brief for a model they already
+// pay for, and pastes the answer back to be verified against the recording
+// before anything is saved. The paste box appears once a brief exists. Past
+// API-loop conversations and import outcomes stay readable underneath.
 function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boolean): string {
   const msgCount = log.filter((l) => l.kind === 'say' || l.kind === 'you' || l.kind === 'think').length;
+  const entries = log.filter((l) => l.kind !== 'block' && l.kind !== 'llm' && l.kind !== 'start').length;
+  const historyLabel = msgCount ? `Past conversation · ${msgCount} message${msgCount === 1 ? '' : 's'}` : `History · ${entries} entr${entries === 1 ? 'y' : 'ies'}`;
   return `<details class="fold" id="effort"${hasSpec ? '' : ' open'}>
     <summary>${CHEV}${IC_SPARK}<span>Maximum Effort Mode</span><span class="badges"><span class="chip">bring your own model</span>${pill('i', '<p>Hand the whole recording to a model you already pay for.</p><p><b>1.</b> State the goal: what should this automation return?</p><p><b>2.</b> Export the brief: one file carrying your goal, the rules and every page and call from the recording.</p><p><b>3.</b> Give it to Claude, Codex or any capable model, then paste its answer back here to be verified and saved.</p><p>Nothing is saved until the answer has been run against your recording and returned what you saw.</p>', 'About Maximum Effort Mode')}</span></summary>
     <div class="fold-body">
     <label class="lbl" for="effort-goal" style="margin-top:0">Goal</label>
     <textarea id="effort-goal" rows="3" placeholder="What should this automation return? e.g. the top 5 listings on the final page, with the title, price and a link to each">${esc(meta.goal ?? '')}</textarea>
     <div class="runrow" style="margin-top:10px">
-      <button id="brief-btn" class="btn" disabled>${DOWNLOAD}Export brief</button>
-      ${pill('i', '<p><b>Coming next.</b> Downloads a single Markdown brief: your goal, the script contract, the acceptance rules and the sanitised evidence, ready to drop into any LLM chat. The paste-back verification lands with it.</p>', 'About the export')}
+      <div class="seg" role="tablist" aria-label="Brief size"><button type="button" id="brief-full" class="seg-btn on">Full</button><button type="button" id="brief-chat" class="seg-btn">Chat-sized</button></div>
+      <button id="brief-btn" class="btn">${DOWNLOAD}Export brief</button>
+      ${pill('i', '<p>Downloads one Markdown file: your goal, the script contract, the acceptance rules, the answer format, then the sanitised evidence: the route, typed values, marks, every page snapshot, the last page’s HTML and the captured calls in full.</p><p><b>Full</b> (up to 4 MB) suits an agent that reads files, such as Claude Code. <b>Chat-sized</b> (600 KB) fits a chat window; whatever the size cut is listed at the end of the file.</p><p>The export also fetches each visited page once, without cookies, and tells the model whether the results are in the plain response. Snapshots show whatever was on your screen. The file is saved as BRIEF.md in the session folder too.</p>', 'About the export')}
+      <span id="brief-status" class="sub"></span>
+    </div>
+    <div id="import-block"${meta.briefAt ? '' : ' hidden'}>
+      <label class="lbl" for="import-text">The model’s answer</label>
+      <textarea id="import-text" rows="6" spellcheck="false" placeholder="Paste the whole reply, or just its json block"></textarea>
+      <div class="runrow" style="margin-top:10px">
+        <button id="import-btn" class="btn">${TICK}Verify &amp; save</button>
+        ${pill('i', '<p>The answer is linted, executed with the recorded values, and its rows compared with what you saw while recording. It is saved only when they match. Otherwise the exact reason appears here, ready to paste back to the model.</p>', 'About verification')}
+      </div>
+      <div id="import-out"></div>
     </div>
     ${log.length ? `<details class="fold-sub">
-      <summary>Past conversation · ${msgCount} message${msgCount === 1 ? '' : 's'}</summary>
+      <summary>${historyLabel}</summary>
       <div class="fold-body"><div id="effort-chat" class="chat"></div></div>
     </details>` : ''}
     </div>
@@ -859,9 +877,81 @@ function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boole
 
   <script>
   (() => {
+    const id = ${JSON.stringify(meta.session)};
+    const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const goalEl = document.getElementById('effort-goal');
+    const briefBtn = document.getElementById('brief-btn');
+    const briefStatus = document.getElementById('brief-status');
+    const block = document.getElementById('import-block');
+    const full = document.getElementById('brief-full');
+    const chat = document.getElementById('brief-chat');
+    let budget = ${4 * 1024 * 1024};
+    full.addEventListener('click', () => { full.classList.add('on'); chat.classList.remove('on'); budget = ${4 * 1024 * 1024}; });
+    chat.addEventListener('click', () => { chat.classList.add('on'); full.classList.remove('on'); budget = ${600 * 1024}; });
+    briefBtn.addEventListener('click', async () => {
+      briefBtn.disabled = true;
+      briefStatus.textContent = 'Building the brief (fetching each visited page once)…';
+      try {
+        const r = await fetch('/api/sessions/' + encodeURIComponent(id) + '/brief', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ goal: goalEl.value, budget }),
+        });
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          throw new Error(e.error || ('HTTP ' + r.status));
+        }
+        const md = await r.text();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+        a.download = id + '-brief.md';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+        briefStatus.textContent = 'Exported ' + Math.round(md.length / 1024) + ' KB. Also saved as BRIEF.md in the session folder.';
+        block.hidden = false;
+      } catch (e) {
+        briefStatus.textContent = 'Export failed: ' + e.message;
+      }
+      briefBtn.disabled = false;
+    });
+
+    const importBtn = document.getElementById('import-btn');
+    const importText = document.getElementById('import-text');
+    const out = document.getElementById('import-out');
+    importBtn.addEventListener('click', async () => {
+      const text = importText.value.trim();
+      if (!text) { out.innerHTML = '<p class="fail-note">Paste the answer first.</p>'; return; }
+      importBtn.disabled = true;
+      const stopTimer = showLoading(out, 'Verifying against the recording');
+      try {
+        const r = await fetch('/api/sessions/' + encodeURIComponent(id) + '/import', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        const res = await r.json();
+        stopTimer();
+        if (r.ok) {
+          let html = '<p class="ok-note">✓ ' + esc(res.text) + '</p>';
+          for (const n of res.robots ?? []) html += '<p class="note" style="margin-top:8px">' + esc(n) + '</p>';
+          out.innerHTML = html;
+          const view = document.createElement('button');
+          view.className = 'btn';
+          view.style.marginTop = '10px';
+          view.textContent = 'View & run the automation';
+          view.addEventListener('click', () => location.reload());
+          out.append(view);
+        } else {
+          out.innerHTML = '<p class="fail-note">✗ ' + esc(res.error || ('HTTP ' + r.status)) + '</p><p class="sub" style="margin-top:6px">Paste this reason back to the model and try its next answer here.</p>';
+        }
+      } catch (e) {
+        stopTimer();
+        out.innerHTML = '<p class="fail-note">✗ Could not reach the local backend: ' + esc(e.message) + '</p>';
+      }
+      importBtn.disabled = false;
+    });
+
     const past = ${jsonForScript(log)};
-    const chat = document.getElementById('effort-chat');
-    if (!chat || !past.length) return;
+    const chatEl = document.getElementById('effort-chat');
+    if (!chatEl || !past.length) return;
     const GLYPH = { info: '· ', tool: '⚙ ', try: '→ ', fail: '✗ ', ok: '✓ ', saved: '✓ ', advice: '☞ ', error: '✗ ', done: '· ', await: '… ' };
     function bubble(kind, text) {
       if (kind === 'think') {
@@ -872,13 +962,13 @@ function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boole
         const body = document.createElement('div');
         body.textContent = text;
         det.append(sum, body);
-        chat.append(det);
+        chatEl.append(det);
         return;
       }
       const d = document.createElement('div');
       d.className = 'msg msg-' + kind;
       d.textContent = text;
-      chat.append(d);
+      chatEl.append(d);
     }
     for (const e of past) {
       if (e.kind === 'say' || e.kind === 'think' || e.kind === 'you') bubble(e.kind, e.text);
@@ -886,14 +976,14 @@ function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boole
         const d = document.createElement('div');
         d.className = 'msg-sep';
         d.textContent = 'conversation started ' + new Date(e.text).toLocaleString('en-GB');
-        chat.append(d);
+        chatEl.append(d);
       } else if (e.kind === 'block' || e.kind === 'llm') {
         continue;
       } else {
         const d = document.createElement('div');
         d.className = 'msg msg-status rc-' + e.kind;
         d.textContent = (GLYPH[e.kind] ?? '') + e.text;
-        chat.append(d);
+        chatEl.append(d);
       }
     }
   })();

@@ -26,7 +26,7 @@ import { createContext, Script } from 'node:vm';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { UA, readBearerViaBrowser, type Bearer } from './browser-token.js';
 
-export type ScriptOk = { rows: Record<string, unknown>[]; hosts: string[]; log: string[]; ms: number };
+export type ScriptOk = { rows: Record<string, unknown>[]; hosts: string[]; urls: string[]; log: string[]; ms: number };
 export type ScriptFail = { error: string; hosts: string[]; log: string[] };
 export type ScriptResult = ScriptOk | ScriptFail;
 
@@ -52,6 +52,8 @@ function hostOf(url: string): string {
 
 class HostGuard {
   readonly used = new Set<string>();
+  // The URLs actually contacted, for the robots.txt report on acceptance.
+  readonly urls = new Set<string>();
   constructor(private readonly allowed: string[] | undefined) {}
   check(url: string) {
     const h = hostOf(url);
@@ -59,6 +61,7 @@ class HostGuard {
       throw new Error(`host ${h} is outside the hosts this automation was verified against (${this.allowed.join(', ')})`);
     }
     this.used.add(h);
+    if (this.urls.size < 200) this.urls.add(url.split('#')[0]);
   }
 }
 
@@ -271,7 +274,7 @@ export async function runScript(source: string, options: ScriptOptions): Promise
     try {
       const value = await Promise.race([Promise.resolve().then(() => run(ctx)), timeout]);
       const rows = normaliseRows(value);
-      return finish({ rows, hosts: [...guard.used], log, ms: Date.now() - started });
+      return finish({ rows, hosts: [...guard.used], urls: [...guard.urls], log, ms: Date.now() - started });
     } finally {
       if (timer) clearTimeout(timer);
     }

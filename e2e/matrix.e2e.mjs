@@ -165,6 +165,15 @@ try {
   });
   const ssrSpec = await api('/api/sessions/mx-ssr/spec', {});
   check('ssr: refuses to generate a spec', !ssrSpec.steps, JSON.stringify(ssrSpec).slice(0, 200));
+  // What the recorder keeps for a model to rebuild a form-driven flow: the
+  // form as submitted, the clicked element's markup, page snapshots with the
+  // names of web storage keys.
+  const ssrEvents = (await api('/api/sessions/mx-ssr/export')).events;
+  const submitted = ssrEvents.find((e) => e.kind === 'action' && e.action === 'submit' && e.form);
+  check('ssr: the submitted form is recorded with its method, action and fields',
+    submitted?.form.method === 'GET' && /\/ssr\/results$/.test(submitted.form.action) && JSON.stringify(submitted.form.fields) === '[{"name":"q","value":"gulf"}]', JSON.stringify(submitted?.form));
+  check('ssr: the clicked button carries its own markup', ssrEvents.some((e) => e.kind === 'action' && e.action === 'click' && /id="go"/.test(e.html ?? '')));
+  check('ssr: snapshots carry web storage key names', ssrEvents.some((e) => e.kind === 'snapshot' && Array.isArray(e.storage?.local) && Array.isArray(e.storage?.session)));
 
   // 7. Awkward values and data: specials in the typed value (URL-borne),
   // nulls, booleans and arrays in the rows.

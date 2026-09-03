@@ -8,12 +8,13 @@
 // its rows reproduce something the operator saw. The conversation goes on
 // after a save, so the operator can ask for changes in the same breath.
 import Anthropic from '@anthropic-ai/sdk';
-import { analyse, markKey, objectHasMark } from './analyse.js';
-import { SPEC_VERSION, type Spec } from './generate.js';
+import { markKey } from './analyse.js';
+import type { Spec } from './generate.js';
 import type { Bearer } from '../../runner/src/browser-token.js';
-import { SCRIPT_FILE, getMeta, getScript, getSpec, readEvents, saveMeta, saveScript, saveSpec, status } from './store.js';
-import { lintScript, literalCarries, runScript, stringLiterals, type ScriptOk } from '../../runner/src/script.js';
-import { INVESTIGATE_TOOLS, estimateSpend, evidenceStrings, navSummary, overview, paramNames, rowText, runTool, shortMark, type Emit, type Ev, type ToolCtx, type Usage } from './llm-tools.js';
+import { getScript, getSpec, saveMeta } from './store.js';
+import type { ScriptOk } from '../../runner/src/script.js';
+import { ACCEPTANCE_RULES, checkCandidate, loadEvidence, saveCandidate, scriptContract, type Candidate } from './candidate.js';
+import { INVESTIGATE_TOOLS, estimateSpend, navSummary, overview, runTool, type Emit, type ToolCtx, type Usage } from './llm-tools.js';
 
 export const MODEL = process.env.EFFORT_MODEL ?? 'claude-opus-5';
 const EFFORT = (process.env.EFFORT_LEVEL ?? 'xhigh') as 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -25,7 +26,6 @@ const MAX_TOOL_CALLS = 120;
 const MAX_SCRIPT_TRIES = 12;
 const MAX_INPUT_TOKENS = 8_000_000; // cumulative, cache reads included
 const IDLE_MS = 15 * 60_000;         // how long the model waits for a reply
-const EVIDENCE_CHARS = 3_000_000;    // snapshot text the acceptance check searches
 
 // Operator messages typed while the loop runs. Taken at the start of the
 // next turn, or awaited when the model has handed the conversation over.
@@ -77,103 +77,10 @@ TOOLS
 - give_up: only when no automation is possible from this recording; say what to record differently.
 
 THE SCRIPT
-Plain JavaScript (no import, require, process, eval). Define:
-  async function run(ctx) { ... return rows; }
-ctx.inputs        — the run's parameters by the names you declare in write_script. Read every one from here; never hard-code a recorded value.
-ctx.http.fetch(url, { method, headers, body }) → { status, ok, url, contentType, text, json() }. body may be an object (sent as JSON) or a string. Cookie/authorization headers are dropped.
-ctx.dom(html) → page handle over HTML you already fetched, no network: eval(expression), text(selector?), texts(selector), html(selector?), attr(selector, name), close(). Use it to parse server-rendered results.
-ctx.browser.open(url) → page handle on a live page: goto(url), fill(selector, text), click(selector), press(selector, key), waitFor(selector, ms) → boolean, wait(ms), text(selector?), texts(selector), html(selector?), attr(selector, name), eval(expression), url(), close().
-  eval takes an expression, e.g. "[...document.querySelectorAll('.row')].map(r => ({ title: r.querySelector('h3')?.textContent?.trim(), link: r.querySelector('a')?.href }))"; the result must survive JSON.
-ctx.site.token(pageUrl) → the anonymous bearer the site mints for every visitor, read from its web storage after loading pageUrl. Send it as headers: { authorization: 'Bearer ' + token }. This is the ONLY credential a script may send.
-ctx.log(...) — notes shown to the operator on failure. ctx.sleep(ms).
-Return an array of flat row objects — one per result, plain string/number fields named as a person would name columns (title, price, link). Absolute URLs for links.
+${scriptContract('write_script')}
 
 ACCEPTANCE (deterministic, applied to every submission)
-1. Lint: reads every declared parameter from ctx.inputs; carries no recorded typed value as a literal unless you list it in "fixed" and explain why in the summary; no imports.
-2. Executed with the declared example values (the recorded ones) within 120 seconds, returning at least one row.
-3. Evidence: if the operator marked text, each marked selection must appear as a field value in some row. Otherwise at least one row must carry text that appears in a page snapshot the operator saw (or the typed value, or a result they clicked). Ask for plain text rather than HTML.
-Hosts the accepted script contacted are recorded; later runs are confined to them.`;
-
-// --- acceptance ---------------------------------------------------------------
-
-type Param = { name: string; example: string; description?: string };
-type Verdict =
-  | { ok: true; run: ScriptOk; missing: string[]; columns: string[]; note: string }
-  | { ok: false; reason: string; partial?: { run: ScriptOk; missing: string[]; columns: string[] } };
-
-function snapshotHaystack(events: Ev[]): string {
-  let out = '';
-  for (const e of events) {
-    if (e.kind !== 'snapshot') continue;
-    out += ' ' + markKey(String(e.text ?? '')) + ' ' + markKey(String(e.html ?? ''));
-    if (out.length > EVIDENCE_CHARS) break;
-  }
-  return out.slice(0, EVIDENCE_CHARS);
-}
-
-// How many rows carry a value the operator saw on some page: a string field
-// of four or more letters and digits found in a snapshot.
-function rowsSeen(rows: Record<string, unknown>[], hay: string): number {
-  if (!hay) return 0;
-  let n = 0;
-  for (const row of rows.slice(0, 200)) {
-    const hit = Object.values(row).some((v) => {
-      if (typeof v !== 'string' && typeof v !== 'number') return false;
-      const k = markKey(String(v));
-      return k.length >= 4 && hay.includes(k);
-    });
-    if (hit) n++;
-  }
-  return n;
-}
-
-async function accept(
-  source: string, params: Param[], fixed: string[], typed: string[], marks: string[], evidence: string[], hay: string,
-  readToken: ToolCtx['readToken'],
-): Promise<Verdict> {
-  const inputs = Object.fromEntries(params.map((p) => [p.name, p.example]));
-  const lint = lintScript(source, inputs);
-  // A typed value that is not a parameter must not be baked in silently.
-  const literals = stringLiterals(source);
-  for (const v of typed) {
-    if (v.length < 3 || params.some((p) => p.example === v) || fixed.includes(v)) continue;
-    if (literals.some((l) => literalCarries(l, v))) lint.push(`the typed value "${v}" is hard-coded — declare it as a parameter, or list it under "fixed" and say why it never changes`);
-  }
-  if (lint.length) return { ok: false, reason: `lint: ${lint.join('; ')}` };
-  const run = await runScript(source, { inputs, readToken, timeoutMs: 120_000 });
-  if ('error' in run) {
-    return { ok: false, reason: `the script failed: ${run.error}${run.log.length ? ` — log: ${run.log.slice(-5).join(' | ')}` : ''}` };
-  }
-  if (!run.rows.length) {
-    return { ok: false, reason: `the script returned no rows for the recorded input(s)${run.log.length ? ` — log: ${run.log.slice(-5).join(' | ')}` : ''}` };
-  }
-  const columns = [...new Set(run.rows.flatMap((r) => Object.keys(r)))];
-  const first = `First row: ${JSON.stringify(run.rows[0]).slice(0, 400)}`;
-  if (marks.length) {
-    const missing = marks.filter((m) => !run.rows.some((r) => objectHasMark(r, m)));
-    if (missing.length === marks.length) {
-      return { ok: false, reason: `the rows carry none of the operator's marked selections as a field value (${marks.map(shortMark).join(', ')}). ${first}` };
-    }
-    if (missing.length) {
-      return {
-        ok: false,
-        reason: `${marks.length - missing.length} of ${marks.length} marked selections located; missing: ${missing.map(shortMark).join(', ')}. Add the field(s) that carry the missing text, or say why no source has it.`,
-        partial: { run, missing, columns },
-      };
-    }
-    return { ok: true, run, missing: [], columns, note: `all ${marks.length} marked selection(s) located` };
-  }
-  const seen = rowsSeen(run.rows, hay);
-  if (seen) return { ok: true, run, missing: [], columns, note: `${seen} of ${Math.min(run.rows.length, 200)} row(s) carry text the operator saw on a recorded page` };
-  const text = run.rows.slice(0, 200).map(rowText).join('\n');
-  const typedHit = typed.find((v) => v.length >= 2 && text.includes(markKey(v)));
-  const clicked = evidence.find((ev) => text.includes(ev));
-  if (typedHit || clicked) return { ok: true, run, missing: [], columns, note: typedHit ? `rows carry the typed value "${typedHit}"` : `rows carry the clicked result "${clicked}"` };
-  return {
-    ok: false,
-    reason: `no row carries anything the operator saw: nothing from the page snapshots${typed.length ? `, not the typed value(s) ${typed.map((v) => `"${v}"`).join(', ')}` : ''}${evidence.length ? `, not a clicked result (${evidence.map((e) => `"${e}"`).join(', ')})` : ''}. Return fields whose plain text appears on the recorded page (titles, names, prices), not only ids or links. ${first}`,
-  };
-}
+${ACCEPTANCE_RULES}`;
 
 // --- tools ----------------------------------------------------------------------
 
@@ -233,22 +140,16 @@ function describeExisting(spec: Spec, script: string | undefined): string {
 // --- the loop --------------------------------------------------------------------
 
 export async function maxEffort(id: string, emit: Emit, signal: AbortSignal, input: EffortInput): Promise<void> {
-  const meta = getMeta(id);
-  if (!meta) { emit('error', 'unknown session'); return; }
-  if (status(meta) !== 'complete') { emit('error', `session is ${status(meta)} — only complete recordings can be worked on`); return; }
+  const loaded = loadEvidence(id);
+  if ('error' in loaded) { emit('error', loaded.error); return; }
+  const ev = loaded;
+  const { meta, events, a, marks, typed, snapshots, firstPage } = ev;
+  const evidence = ev.clicked;
   const goal = input.goal.trim().slice(0, 4000);
   if (goal) { meta.goal = goal; saveMeta(meta); }
 
-  const events = readEvents(id);
-  const a = analyse({ meta: { session: id, status: 'complete' }, events });
-  const marks = a.marks;
-  const typed = paramNames(a);
-  const evidence = evidenceStrings(events, a);
-  const snapshots = events.filter((e) => e.kind === 'snapshot');
-  const hay = snapshotHaystack(events);
   const existing = getSpec(id) as Spec | undefined;
   const existingScript = existing?.steps.find((s) => s.type === 'script');
-  const firstPage = events.find((e) => e.kind === 'page' && typeof e.url === 'string')?.url as string | undefined;
 
   emit('info', `Reading the recording: ${events.length} events, ${snapshots.length} page snapshot(s), ${a.calls.length} captured call(s)${typed.length ? `, typed ${typed.map((p) => `"${p.value}"`).join(', ')}` : ''}${marks.length ? `, ${marks.length} marked selection(s)` : ''}.`);
   if (!snapshots.length) emit('info', 'This recording has no page snapshots (recorded before snapshots existed, or the extension was not reloaded). The model will rely on captured calls and live pages; a fresh recording gives it far more to work with.');
@@ -289,25 +190,13 @@ export async function maxEffort(id: string, emit: Emit, signal: AbortSignal, inp
   let toolCalls = 0;
   let scriptTries = 0;
   let saved = 0;
-  let partial: { source: string; title: string; summary: string; params: Param[]; run: ScriptOk; missing: string[] } | undefined;
+  let partial: { candidate: Candidate; run: ScriptOk; missing: string[] } | undefined;
 
-  const save = (source: string, title: string, summary: string, params: Param[], run: ScriptOk, note: string) => {
-    const columns = [...new Set(run.rows.flatMap((r) => Object.keys(r)))];
-    saveScript(id, SCRIPT_FILE, source);
-    const spec: Spec = {
-      version: SPEC_VERSION,
-      name: id,
-      origin: firstPage ? new URL(firstPage).origin : `https://${meta.hosts[0]}`,
-      language: a.language,
-      parameters: params.map((p) => ({ name: p.name, example: p.example, required: true })),
-      steps: [{ id: 'automation', type: 'script', file: SCRIPT_FILE, reason: summary, hosts: run.hosts }],
-      outcome: { fromStep: 'automation', expect: { path: '__http_ok', equals: 'true' }, extract: { records: 'rows' } },
-      repaired: { at: new Date().toISOString(), model: MODEL, diagnosis: summary, summary, mode: 'effort', ...(goal ? { feedback: goal } : {}) },
-    };
-    saveSpec(id, spec);
-    if (!meta.name && title) { meta.name = title.slice(0, 80); saveMeta(meta); }
+  const save = (c: Candidate, run: ScriptOk, note: string, robots: string[] = []) => {
+    const { columns } = saveCandidate(ev, c, run, { model: MODEL, mode: 'effort' }, robots);
+    for (const r of robots) emit('info', r);
     saved++;
-    emit('saved', `Automation ${saved > 1 || existing ? 'updated' : 'saved'}${title ? ` as "${title}"` : ''} — ${note}; ${run.rows.length} row(s) with columns ${columns.join(', ')}; parameters ${params.map((p) => p.name).join(', ') || 'none'}; hosts ${run.hosts.join(', ') || 'none'}.`);
+    emit('saved', `Automation ${saved > 1 || existing ? 'updated' : 'saved'}${c.title ? ` as "${c.title}"` : ''} — ${note}; ${run.rows.length} row(s) with columns ${columns.join(', ')}; parameters ${c.parameters.map((p) => p.name).join(', ') || 'none'}; hosts ${run.hosts.join(', ') || 'none'}.`);
   };
   const finish = (kind: string, text: string) => {
     emit(kind, text);
@@ -315,7 +204,7 @@ export async function maxEffort(id: string, emit: Emit, signal: AbortSignal, inp
   };
   const keepPartial = (why: string) => {
     if (!partial) return false;
-    save(partial.source, partial.title, partial.summary, partial.params, partial.run, `${why}; kept the best verified attempt (${marks.length - partial.missing.length} of ${marks.length} marked selections)`);
+    save(partial.candidate, partial.run, `${why}; kept the best verified attempt (${marks.length - partial.missing.length} of ${marks.length} marked selections)`);
     return true;
   };
   const stopped = () => {
@@ -416,27 +305,26 @@ export async function maxEffort(id: string, emit: Emit, signal: AbortSignal, inp
         const source = String(args.source ?? '');
         const title = String(args.title ?? '').slice(0, 80);
         const summary = String(args.summary ?? '').slice(0, 1200);
-        const params: Param[] = (Array.isArray(args.parameters) ? args.parameters as Param[] : [])
-          .map((p) => ({ name: String(p?.name ?? '').trim(), example: String(p?.example ?? ''), ...(p?.description ? { description: String(p.description).slice(0, 200) } : {}) }))
-          .filter((p) => p.name);
-        const fixed = Array.isArray(args.fixed) ? (args.fixed as unknown[]).map(String) : [];
-        const bad = params.find((p) => !/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(p.name));
-        const dup = params.find((p, i) => params.findIndex((q) => q.name === p.name) !== i);
+        const candidate: Candidate = {
+          source, title, summary,
+          parameters: (Array.isArray(args.parameters) ? args.parameters as Record<string, unknown>[] : [])
+            .map((p) => ({ name: String(p?.name ?? '').trim(), example: String(p?.example ?? ''), ...(p?.description ? { description: String(p.description).slice(0, 200) } : {}) }))
+            .filter((p) => p.name),
+          fixed: Array.isArray(args.fixed) ? (args.fixed as unknown[]).map(String) : [],
+        };
+        const params = candidate.parameters;
         emit('try', `Script attempt ${scriptTries}: ${params.length ? `parameters ${params.map((p) => `${p.name}="${p.example}"`).join(', ')}` : 'no parameters'} — executing… (${source.length} chars)`);
-        const v = bad ? { ok: false as const, reason: `parameter name "${bad.name}" is not an identifier (letters, digits, underscores)` }
-          : dup ? { ok: false as const, reason: `parameter "${dup.name}" is declared twice` }
-          : params.some((p) => !p.example) ? { ok: false as const, reason: 'every parameter needs an example: the recorded value, so the acceptance run reproduces the recording' }
-          : await accept(source, params, fixed, typed.map((p) => p.value), marks, evidence, hay, readToken);
+        const v = await checkCandidate(candidate, ev, readToken);
         if (v.ok) {
           emit('ok', `verified: ${v.note}; ${v.run.rows.length} row(s), columns ${v.columns.join(', ')}, hosts ${v.run.hosts.join(', ') || 'none'}, ${(v.run.ms / 1000).toFixed(1)}s`);
-          save(source, title, summary, params, v.run, v.note);
+          save(candidate, v.run, v.note, v.robots);
           partial = undefined;
           results.push({ type: 'tool_result', tool_use_id: use.id, content: `ACCEPTED and saved. ${v.note}; ${v.run.rows.length} row(s); columns ${v.columns.join(', ')}; first row ${JSON.stringify(v.run.rows[0]).slice(0, 600)}. Tell the operator what the automation returns, which choices are baked in, and how to run it (parameters ${params.map((p) => p.name).join(', ') || 'none'}); then end your turn so they can reply.` });
           continue;
         }
         emit('fail', v.reason);
         if (v.partial && (!partial || partial.missing.length > v.partial.missing.length)) {
-          partial = { source, title, summary, params, run: v.partial.run, missing: v.partial.missing };
+          partial = { candidate, run: v.partial.run, missing: v.partial.missing };
         }
         if (scriptTries >= MAX_SCRIPT_TRIES) {
           keepPartial('attempt limit reached');

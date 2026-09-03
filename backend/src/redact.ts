@@ -61,6 +61,17 @@ export function sanitise(evt: Record<string, unknown>, _hosts: string[]): Record
     const clean = replayableHeaders(out.reqHeaders);
     if (Object.keys(clean).length) out.reqHeaders = clean; else delete out.reqHeaders;
   }
+  // Response headers are evidence (pagination, totals), never replayed;
+  // only credential-shaped names are dropped.
+  if (out.resHeaders !== undefined) {
+    const clean: Record<string, string> = {};
+    if (out.resHeaders && typeof out.resHeaders === 'object') {
+      for (const [k, v] of Object.entries(out.resHeaders as Record<string, unknown>)) {
+        if (!FORBIDDEN_KEYS.test(k) && typeof v === 'string') clean[k.toLowerCase()] = v;
+      }
+    }
+    if (Object.keys(clean).length) out.resHeaders = clean; else delete out.resHeaders;
+  }
   if (out.kind === 'net' || out.kind === 'net_meta') {
     if (typeof out.url !== 'string' || !/^https?:\/\//.test(out.url)) return undefined;
     capBody(out, 'reqBody', REQ_CAP);

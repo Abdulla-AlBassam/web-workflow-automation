@@ -29,8 +29,10 @@ export type Spec = {
   // generator would only refuse again. Mode "refine" means the loop replaced
   // an automation whose runs the operator flagged, with their note if given.
   // Mode "effort" is Maximum Effort Mode: the operator's goal is kept in
-  // `feedback`, the model's account of the automation in `summary`.
-  repaired?: { at: string; model: string; diagnosis: string; mode?: 'repair' | 'refine' | 'effort'; feedback?: string; summary?: string };
+  // `feedback`, the model's account of the automation in `summary`. Mode
+  // "import" is the same shape written by an external model from the
+  // exported brief and verified on import (model "external").
+  repaired?: { at: string; model: string; diagnosis: string; mode?: 'repair' | 'refine' | 'effort' | 'import'; feedback?: string; summary?: string };
 };
 
 export type Column = { name: string; path: string; scope: 'row' | 'body' };
@@ -41,8 +43,10 @@ export type Step =
   | { id: string; type: 'browser-token'; loadUrl: string; reason: string }
   // A session script written by the LLM repair assistant for this recording
   // alone (see runner/src/script.ts): `file` sits in the session folder,
-  // `hosts` is the list it was verified against and is confined to.
-  | { id: string; type: 'script'; file: string; reason: string; hosts: string[] }
+  // `hosts` is the list it was verified against and is confined to. `robots`
+  // reports the URLs it contacted on acceptance that the site's robots.txt
+  // disallows for all agents: shown to the operator, never enforced.
+  | { id: string; type: 'script'; file: string; reason: string; hosts: string[]; robots?: string[] }
   // Server-rendered outcome: a browser loads the linked page and reads the
   // operator-marked elements. Carries a reason like every browser step.
   | { id: string; type: 'browser-extract'; url: string; reason: string;

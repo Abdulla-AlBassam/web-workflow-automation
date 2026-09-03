@@ -111,6 +111,17 @@ function prunedHtml(): { html: string; truncated: boolean } {
   return html.length > HTML_CAP ? { html: html.slice(0, HTML_CAP), truncated: true } : { html, truncated: false };
 }
 
+// Key names only: a token's presence and its home are evidence, its value is
+// a credential. The runner's token reader discovers the value at run time.
+function storageKeys(): { local: string[]; session: string[] } {
+  const names = (s: Storage | undefined) => {
+    const out: string[] = [];
+    try { for (let i = 0; s && i < s.length && out.length < 50; i++) { const k = s.key(i); if (k) out.push(k.slice(0, 80)); } } catch { /* storage refused */ }
+    return out;
+  };
+  return { local: names(window.localStorage), session: names(window.sessionStorage) };
+}
+
 let lastSnapshot = '';
 let snapshotTimers: number[] = [];
 
@@ -134,6 +145,7 @@ function snapshot(reason: string) {
   push({
     kind: 'snapshot', reason, url: location.href, title: document.title,
     text: scrub(text.slice(0, TEXT_CAP)), html: scrub(html),
+    storage: storageKeys(),
     ...(text.length > TEXT_CAP ? { textTruncated: text.length } : {}),
     ...(truncated ? { htmlTruncated: true } : {}),
   });
@@ -153,7 +165,16 @@ const INTERACTIVE = 'a,button,input,select,textarea,label,[role="button"],[role=
 document.addEventListener('click', (e) => {
   if ((e.target as Element)?.closest?.('[data-wfr]')) return;
   const el = (e.target as Element)?.closest?.(INTERACTIVE) ?? (e.target as Element);
-  if (el instanceof Element) push({ kind: 'action', action: 'click', target: describe(el) });
+  if (el instanceof Element) {
+    const evt: Evt = { kind: 'action', action: 'click', target: describe(el) };
+    // The element's own markup: ids, data attributes and the link as written.
+    // Form controls are left out; their values are recorded on change.
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) {
+      const html = scrub(el.outerHTML.replace(/\s+/g, ' '));
+      if (html) evt.html = html.slice(0, 800);
+    }
+    push(evt);
+  }
   snapshotSoon('change');
 }, { capture: true, passive: true });
 
@@ -217,8 +238,15 @@ document.addEventListener('change', (e) => {
     evt.value = '[REDACTED]';
   } else {
     evt.value = scrub(el.value);
+    // The option's visible text is what the operator chose; the value is
+    // often an opaque code.
+    if (el instanceof HTMLSelectElement) {
+      const label = el.selectedOptions[0]?.text?.trim();
+      if (label) evt.label = label.slice(0, 120);
+    }
   }
   push(evt);
+  snapshotSoon('change');
 }, { capture: true, passive: true });
 
 document.addEventListener('input', (e) => {
@@ -226,9 +254,43 @@ document.addEventListener('input', (e) => {
   if (el instanceof HTMLInputElement && el.type === 'password' && el.value) secrets.add(el.value);
 }, { capture: true, passive: true });
 
+// A form that navigates (a classic POST) never crosses the network tap and
+// the webRequest listener sees no body, so what it sent is reconstructed
+// from its fields here. A hidden field's value is a token by convention: it
+// is named, never kept. Passwords never leave the page.
+function describeForm(form: HTMLFormElement): Evt {
+  const fields: Evt[] = [];
+  for (const el of Array.from(form.elements).slice(0, 80)) {
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) || !el.name) continue;
+    if (el instanceof HTMLInputElement) {
+      if (el.type === 'password') { if (el.value) secrets.add(el.value); fields.push({ name: el.name, value: '[REDACTED]' }); continue; }
+      if (el.type === 'hidden') { fields.push({ name: el.name, hidden: true }); continue; }
+      if (/^(file|submit|button|image|reset)$/.test(el.type)) continue;
+      if ((el.type === 'checkbox' || el.type === 'radio') && !el.checked) continue;
+    }
+    const f: Evt = { name: el.name, value: scrub(el.value)?.slice(0, 500) };
+    if (el instanceof HTMLSelectElement) {
+      const label = el.selectedOptions[0]?.text?.trim();
+      if (label) f.label = label.slice(0, 120);
+    }
+    fields.push(f);
+  }
+  // Attribute reads, not properties: a field named "action" or "method"
+  // shadows the form's own.
+  const d: Evt = {
+    method: (form.getAttribute('method') || 'get').toUpperCase(),
+    action: new URL(form.getAttribute('action') || '', location.href).href,
+    fields,
+  };
+  const enctype = form.getAttribute('enctype');
+  if (enctype) d.enctype = enctype;
+  return d;
+}
+
 document.addEventListener('submit', (e) => {
   const form = e.target as Element;
-  if (form instanceof Element) push({ kind: 'action', action: 'submit', target: describe(form) });
+  if (form instanceof HTMLFormElement) push({ kind: 'action', action: 'submit', target: describe(form), form: describeForm(form) });
+  else if (form instanceof Element) push({ kind: 'action', action: 'submit', target: describe(form) });
   snapshotSoon('change');
 }, { capture: true, passive: true });
 
@@ -255,7 +317,17 @@ window.addEventListener('message', (e: MessageEvent) => {
     }
     if (Object.keys(clean).length) evt.reqHeaders = clean; else delete evt.reqHeaders;
   }
+  if (net.resHeaders && typeof net.resHeaders === 'object') {
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(net.resHeaders as Record<string, string>)) {
+      if (/cookie|authorization|x-api-key|bearer/i.test(k)) continue;
+      clean[k] = String(v).slice(0, 500);
+    }
+    if (Object.keys(clean).length) evt.resHeaders = clean; else delete evt.resHeaders;
+  }
   push(evt);
+  // Data that just arrived is about to change the page; look once it has.
+  if (typeof net.status === 'number' && net.status < 400) snapshotSoon('response');
 });
 
 function pageEvent() {

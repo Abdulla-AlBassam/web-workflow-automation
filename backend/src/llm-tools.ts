@@ -76,7 +76,9 @@ export function overview(events: Ev[], a: Analysis): string {
       const req = e.reqBody ? ` reqBody(${String(e.reqBody).length} chars): ${String(e.reqBody).slice(0, 200)}` : '';
       const hdr = e.reqHeaders && typeof e.reqHeaders === 'object'
         ? ` reqHeaders ${JSON.stringify(e.reqHeaders).slice(0, 300)}` : '';
-      lines.push(`${seq} net ${e.method} ${e.url} → ${e.status} ${e.contentType ?? ''}${flag}${cut}${hdr}${req}`);
+      const rhdr = e.resHeaders && typeof e.resHeaders === 'object'
+        ? ` resHeaders ${JSON.stringify(e.resHeaders).slice(0, 300)}` : '';
+      lines.push(`${seq} net ${e.method} ${e.url} → ${e.status} ${e.contentType ?? ''}${flag}${cut}${hdr}${rhdr}${req}`);
       lines.push(`     resBody(${body.length} chars)${parsed !== undefined ? ` shape ${shapeOf(parsed).slice(0, 600)}` : ''}: ${body.slice(0, preview).replace(/\s+/g, ' ')}${body.length > preview ? '…' : ''}`);
     } else if (kind === 'action') {
       const t = e.target as { selector?: string; text?: string; tag?: string; href?: string; aria?: string; name?: string; placeholder?: string } | undefined;
@@ -85,13 +87,19 @@ export function overview(events: Ev[], a: Analysis): string {
       const value = e.value !== undefined ? ` value="${e.value}"` : e.checked !== undefined ? ` checked=${e.checked}` : '';
       const mark = e.action === 'mark' ? ` marked="${String(e.text ?? '').slice(0, 300)}"` : '';
       const href = t?.href ? ` href="${t.href}"` : '';
-      lines.push(`${seq} action ${e.action} <${t?.tag ?? '?'}> ${t?.selector ?? ''}${label}${value}${mark}${text}${href}`);
+      const markup = e.html ? ` html=${JSON.stringify(String(e.html).slice(0, 300))}` : '';
+      const option = e.label ? ` option="${String(e.label).slice(0, 80)}"` : '';
+      const form = e.form as { method?: string; action?: string; fields?: unknown[] } | undefined;
+      const submitted = form ? ` form ${form.method} ${form.action} fields ${JSON.stringify(form.fields ?? []).slice(0, 500)}` : '';
+      lines.push(`${seq} action ${e.action} <${t?.tag ?? '?'}> ${t?.selector ?? ''}${label}${value}${option}${mark}${text}${href}${submitted}${markup}`);
     } else if (kind === 'nav' || kind === 'page') {
       lines.push(`${seq} ${kind} ${e.url}${e.title ? ` "${String(e.title).slice(0, 80)}"` : ''}`);
     } else if (kind === 'snapshot') {
       const text = String(e.text ?? '');
       const html = String(e.html ?? '');
-      lines.push(`${seq} snapshot (${e.reason ?? 'page'}) ${e.url}${e.title ? ` "${String(e.title).slice(0, 80)}"` : ''} — what the operator saw: text ${text.length} chars, html ${html.length} chars${e.htmlTruncated ? ' (html cut)' : ''}. read_snapshot ${e.seq} for the full page.`);
+      const st = e.storage as { local?: string[]; session?: string[] } | undefined;
+      const storage = st && (st.local?.length || st.session?.length) ? ` web storage keys (names only): local [${(st.local ?? []).join(', ')}] session [${(st.session ?? []).join(', ')}].` : '';
+      lines.push(`${seq} snapshot (${e.reason ?? 'page'}) ${e.url}${e.title ? ` "${String(e.title).slice(0, 80)}"` : ''} — what the operator saw: text ${text.length} chars, html ${html.length} chars${e.htmlTruncated ? ' (html cut)' : ''}.${storage} read_snapshot ${e.seq} for the full page.`);
       lines.push(`     text: ${text.slice(0, SNAPSHOT_PREVIEW).replace(/\s+/g, ' ')}${text.length > SNAPSHOT_PREVIEW ? '…' : ''}`);
     } else {
       lines.push(`${seq} ${kind}`);
@@ -100,14 +108,18 @@ export function overview(events: Ev[], a: Analysis): string {
   return lines.join('\n');
 }
 
-// The route the operator took, as URLs: each navigation, and for a page
+// The route the operator took, as URLs: each navigation (page loads count
+// too, for recordings made before nav events existed), and for a page
 // that only re-queried the same path, just the query parameters that
 // changed. Filters, sorts and price bounds show up here as plain names.
 export function navSummary(events: Ev[]): string {
   const lines: string[] = [];
   let prev: URL | undefined;
   for (const e of events) {
-    if (e.kind !== 'nav' || typeof e.url !== 'string') continue;
+    // A POST form carries its inputs in the body, not the URL that follows.
+    const form = e.kind === 'action' && e.action === 'submit' ? e.form as { method?: string; action?: string; fields?: unknown[] } | undefined : undefined;
+    if (form?.method === 'POST') lines.push(`#${e.seq} form POST ${form.action} with fields ${JSON.stringify(form.fields ?? []).slice(0, 400)}`);
+    if ((e.kind !== 'nav' && e.kind !== 'page') || typeof e.url !== 'string') continue;
     let u: URL;
     try { u = new URL(e.url); } catch { continue; }
     if (prev && prev.href === u.href) continue;

@@ -22,18 +22,22 @@ are in `fixtures/`.
 Record, analyse, generate, execute.
 
 Record (`extension/`, `backend/`). An MV3 Chrome extension captures typed
-values, clicks, navigations, text the operator highlights, and every
-fetch/XHR request the page makes with its request and response bodies and
-the request headers the page's own code set, whatever host it goes to. It
-also keeps snapshots of the pages the operator looked at: the visible text
-and a pruned copy of the DOM (no scripts, styles, handlers or media), taken
-when a page settles, after an action changed it, and when recording stops.
-For a site that renders its results into the page, the snapshot is the only
-record of the outcome. Bodies are kept up to 2 MB, snapshots up to 600 KB
-of HTML; a longer one is cut and the cut is declared.
-Cookies, `Authorization` headers and password values are stripped in the
-extension and again in the backend. Events stream to a local Fastify
-backend as they happen.
+values with the page's own label for the field, clicks with the clicked
+element's markup, select choices with the option's visible text, forms as
+submitted (method, action and named fields, so a classic POST form is not
+lost to the network tap), navigations, text the operator highlights, and
+every fetch/XHR request the page makes with its request and response
+bodies and headers, whatever host it goes to. It also keeps snapshots of
+the pages the operator looked at: the visible text, a pruned copy of the
+DOM (no scripts, styles, handlers or media) and the names of the page's
+web storage keys, taken when a page settles, after an action or a response
+changed it, and when recording stops. For a site that renders its results
+into the page, the snapshot is the only record of the outcome. Bodies are
+kept up to 2 MB, snapshots up to 600 KB of HTML; a longer one is cut and
+the cut is declared. Cookies, `Authorization` and `Set-Cookie` headers,
+password values and hidden form values are stripped in the extension and
+again in the backend. Events stream to a local Fastify backend as they
+happen.
 
 Analyse (`backend/src/analyse.ts`). Deterministic, no model. Each typed
 value is searched for in every request: JSON and form bodies, URLs in raw,
@@ -161,28 +165,52 @@ prove them, and nothing unproven is saved.
 ## Maximum Effort Mode
 
 The deterministic pipeline is the fast lane: one search, one call, done.
-Everything else goes through Maximum Effort Mode, on the session page.
-The operator says in a sentence what the automation should return ("the
-top 5 listings on the final page, with title, price and a link to each")
-and presses Start. Nothing runs without that press.
+Everything else goes through Maximum Effort Mode, on the session page. It
+uses a model you already pay for, not an API key, in three steps.
 
-The model gets the whole recording: every page the operator looked at, as
-text and pruned DOM; the route they took, with the query parameters that
-changed at each step (a sort, a filter, a price bound shows up here by
-name); every call the site made, bodies readable in full; every value
-typed, labelled the way the page labels it; everything marked; and the
-deterministic analyser's verdict, flagged as a guess. It reasons in the
-open. Its thinking and its prose stream to the page as they are produced,
-it says what it is checking and what it found, and when the goal is
-ambiguous it asks and waits. The operator can answer, add detail or change
-their mind at any point, mid-task or after a save; Stop ends it at once.
+State the goal in a sentence: what the automation should return ("the top
+5 listings on the final page, with title, price and a link to each").
 
-Tools: read a page snapshot (text or HTML); read a captured body page by
-page; probe an endpoint and see the whole response, with the site's
-anonymous bearer when one gates the API; open a page in a headless browser,
-fill, click, and read text, HTML or the result of an expression evaluated
-in the page; write the script; give up with advice on what to record
-differently.
+Export the brief. One Markdown file carries the goal; the script contract
+and the acceptance rules the answer will be held to; the answer format; and
+the sanitised recording, in order of worth: the route with the query
+parameters that changed at each step (a sort, a filter, a price bound shows
+up here by name), every typed value with the page's own label and a
+suggested parameter name, marks and clicked results, the analyser's verdict
+flagged as a guess, a plain-fetch check of each visited page (status, size,
+whether the visible results are in the plain response, and the site's
+robots.txt rule if one applies), the recording in order, every page
+snapshot's text, the last page's pruned DOM and the last page as a plain
+fetch returns it, and the captured calls in full with their request and
+response headers, those carrying a typed value or structured records first.
+"Full" is capped at 4 MB, for an agent that reads files; "Chat-sized" at
+600 KB, for a chat window; `?budget=` on the API takes any size. What the
+budget cut is listed at the end, never dropped silently. The file is also
+written as `BRIEF.md` in the session folder. Snapshots show whatever was on
+the screen.
+
+Paste the answer back. The model answers with one JSON block: title,
+summary, parameters with the recorded values as examples, any typed value
+it chose to fix, and the script. The tool reads that block out of the whole
+reply (a bare script is accepted too, with the typed values as its
+parameters) and verifies it exactly as the API loop verified its own
+attempts. A pass becomes the session's automation, with "external model"
+as its provenance, and the Run card takes over. A fail shows the exact
+rejection text, ready to paste back to the model. Both outcomes are kept
+in the session's history.
+
+With Claude Code or another agent working in this repository: open the
+session folder (`backend/data/<session>/`), read `BRIEF.md`, write
+`automation.candidate.mjs` and a `candidate.json` (`{title, summary,
+parameters, fixed}`) beside it, and run
+
+```bash
+npm run verify -- <session>
+```
+
+until it prints PASS, then `npm run verify -- <session> --save`. The same
+command takes a whole reply file or a JSON block as its second argument.
+Exit codes: 0 PASS, 1 REJECTED, 2 usage.
 
 The script is plain JavaScript, `async function run(ctx)`, taking the
 parameters the model declares (named as a person would: `query`,
@@ -194,7 +222,8 @@ bearer is the only credential it can send. No files, no environment, no
 modules. It is saved as `automation.mjs` in the session folder, shown in
 full on the session page, and runs for every later run of that session.
 
-Acceptance is deterministic and the model cannot skip it. The script must
+Acceptance is deterministic and the same on every path (`backend/src/candidate.ts`
+serves the import route, the CLI and the API loop alike). The script must
 read every declared parameter from `ctx.inputs`, carry no typed value as a
 literal unless it declares that value fixed and says why, and import
 nothing. It is executed with the recorded values and must return rows
@@ -203,27 +232,21 @@ value in some row. Otherwise at least one row must carry text that appears
 in a page snapshot the operator saw, or the typed value, or a result they
 clicked. A script whose rows the operator never saw is rejected with that
 reason. The hosts the accepted script contacted are saved and every later
-run is confined to them. The conversation is kept in the session folder
-and shown again after a reload.
+run is confined to them.
 
-The older assistant is still there for one job: after a run of a
-deterministic automation, Adjust takes a note ("only the name and the
-city") and narrows the fields or rewrites the script, verified the same
-way. For anything bigger the page points at Maximum Effort Mode.
+robots.txt is read, never enforced. On the acceptance run the tool fetches
+each contacted host's robots.txt and, where a URL the script reached is
+disallowed for all agents, says so in the automation's notes and on the
+saved spec. Whether to run it is the operator's call.
 
-Rails: 60 model turns, 120 tool calls, 12 script attempts, a token
-ceiling, an identical call refused from its third occurrence, fifteen
-minutes of waiting for a reply. The page reports the estimated spend.
-Default model `claude-opus-5` at effort `xhigh` with adaptive thinking;
-`EFFORT_MODEL` and `EFFORT_LEVEL` override them (`REPAIR_MODEL` for
-Adjust). Put `ANTHROPIC_API_KEY=...` in a `.env` file at the project root
-and restart the backend. This is the only part of the tool that sends
-anything off the machine, and it sends the sanitised recording.
-
-The model cannot change the tool, save anything unchecked, log in, pass a
-CAPTCHA, send a cookie, reach beyond its verified hosts, touch the
-filesystem, see traffic the recorder never saw, or run without limit. If a
-site changes, the script fails with a reason and the mode is there again.
+The API loop is still in the code (`backend/src/effort.ts`, routes
+`/effort`, `/effort/say`, `/effort/stop`) and covered by its suite, but
+nothing on the page calls it: at frontier prices a single run cost dollars,
+and the brief gives the same model the same evidence for nothing. The older
+assistant, Adjust, is still there for one job: after a run of a
+deterministic automation, a note ("only the name and the city") narrows the
+fields or rewrites the script, verified the same way. `ANTHROPIC_API_KEY`
+in `.env` is needed for Adjust only.
 
 ## Safeguards
 
@@ -236,7 +259,9 @@ site changes, the script fails with a reason and the mode is there again.
 - Every run is started by a person. Stopping a recording sends one
   request on its own: the recorded outcome call, replayed with the page's
   own headers but without credentials, so the generator learns whether a
-  token step is needed.
+  token step is needed. Exporting a brief fetches each visited page once
+  and each host's robots.txt, without cookies (`probe=0` skips it), and
+  accepting a script fetches robots.txt for the hosts it reached.
   Test suites use local fixtures only.
 - The one authenticated call in the Sijilat demonstration uses the
   anonymous token the site issues to every visitor. The runner reads it; it

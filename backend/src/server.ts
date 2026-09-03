@@ -1,8 +1,10 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyReply } from 'fastify';
 import { existsSync, readFileSync } from 'node:fs';
-import { appendEvents, appendLog, createSession, getMeta, getScript, getSpec, listSessions, readEvents, readLog, saveMeta, saveSpec, status } from './store.js';
+import { appendEvents, appendLog, createSession, getMeta, getScript, getSpec, listSessions, readEvents, readLog, saveBrief, saveMeta, saveSpec, status } from './store.js';
 import { repairSession } from './repair.js';
 import { Inbox, maxEffort } from './effort.js';
+import { buildBrief, DEFAULT_BUDGET } from './brief.js';
+import { checkCandidate, loadEvidence, parseCandidate, saveCandidate } from './candidate.js';
 
 // Local secrets (ANTHROPIC_API_KEY for the repair assistant) live in the
 // project's .env, which is gitignored. Environment always wins.
@@ -263,6 +265,69 @@ app.post('/api/sessions/:id/effort/stop', async (req) => {
   const running = efforts.get(id);
   running?.abort.abort();
   return { stopped: running !== undefined };
+});
+
+// Bring your own model. The brief is the whole recording as one Markdown
+// file for a model the operator already pays for; the answer comes back
+// through the import route and is held to the same acceptance as the API
+// loop. GET serves the brief for curl and agents; POST also stores the goal
+// the operator typed. Both write BRIEF.md into the session folder.
+async function sendBrief(id: string, reply: FastifyReply, goal: string | undefined, q: { budget?: unknown; probe?: unknown }) {
+  const meta = getMeta(id);
+  if (!meta) return reply.code(404).send({ error: 'unknown session' });
+  if (goal !== undefined) {
+    const clean = goal.trim().slice(0, 4000);
+    if (clean) meta.goal = clean; else delete meta.goal;
+    saveMeta(meta);
+  }
+  const ev = loadEvidence(id);
+  if ('error' in ev) return reply.code(409).send({ error: ev.error });
+  const budget = Number(q.budget) || DEFAULT_BUDGET;
+  const probe = q.probe !== '0' && q.probe !== 'false' && q.probe !== false;
+  const md = await buildBrief(ev, { budget, probe });
+  saveBrief(id, md);
+  ev.meta.briefAt = Date.now();
+  saveMeta(ev.meta);
+  return reply.type('text/markdown; charset=utf-8').header('content-disposition', `attachment; filename="${id}-brief.md"`).send(md);
+}
+
+app.get('/api/sessions/:id/brief', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  return sendBrief(id, reply, undefined, (req.query ?? {}) as { budget?: unknown; probe?: unknown });
+});
+
+app.post('/api/sessions/:id/brief', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const { goal, budget, probe } = (req.body ?? {}) as { goal?: unknown; budget?: unknown; probe?: unknown };
+  return sendBrief(id, reply, typeof goal === 'string' ? goal : undefined, { budget, probe });
+});
+
+// The model's answer, pasted back: the JSON block the brief asked for (or the
+// whole reply around it, or a bare script). Verified exactly as the API loop
+// verifies a write_script; a pass becomes the session's automation, a fail
+// is a 422 carrying the same rejection text the loop would feed the model,
+// so the operator pastes it straight back. Both outcomes go in the log.
+app.post('/api/sessions/:id/import', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  if (!getMeta(id)) return reply.code(404).send({ error: 'unknown session' });
+  const ev = loadEvidence(id);
+  if ('error' in ev) return reply.code(409).send({ error: ev.error });
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const answer = typeof body.text === 'string' ? body.text : JSON.stringify(body);
+  const candidate = parseCandidate(answer, ev);
+  if ('error' in candidate) return reply.code(422).send({ error: `REJECTED: ${candidate.error}` });
+  const params = candidate.parameters.map((p) => `${p.name}="${p.example}"`).join(', ') || 'none';
+  appendLog(id, { kind: 'info', text: `Answer from an external model imported for verification${candidate.title ? `: "${candidate.title}"` : ''}; parameters ${params}.`, t: Date.now() });
+  const v = await checkCandidate(candidate, ev, cachedReadToken);
+  if (!v.ok) {
+    appendLog(id, { kind: 'fail', text: v.reason, t: Date.now() });
+    return reply.code(422).send({ error: `REJECTED: ${v.reason}` });
+  }
+  const { columns } = saveCandidate(ev, candidate, v.run, { model: 'external', mode: 'import' }, v.robots);
+  for (const r of v.robots) appendLog(id, { kind: 'info', text: r, t: Date.now() });
+  const text = `Automation ${candidate.title ? `saved as "${candidate.title}"` : 'saved'} — ${v.note}; ${v.run.rows.length} row(s) with columns ${columns.join(', ')}; parameters ${candidate.parameters.map((p) => p.name).join(', ') || 'none'}; hosts ${v.run.hosts.join(', ') || 'none'}.`;
+  appendLog(id, { kind: 'saved', text, t: Date.now() });
+  return { ok: true, text, title: candidate.title, note: v.note, rows: v.run.rows.length, columns, parameters: candidate.parameters.map((p) => p.name), hosts: v.run.hosts, robots: v.robots };
 });
 
 // Tokens are cached per origin so bulk runs pay the browser-launch cost once,
