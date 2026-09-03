@@ -146,6 +146,9 @@ const llm = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
+    // A port probe from another suite runner arrives with no body; it must
+    // not bring this run down.
+    if (!body) { res.writeHead(400).end(); return; }
     llmRequests.push(JSON.parse(body));
     sse(res, scripts.shift() ?? FOREVER());
   });
@@ -412,6 +415,164 @@ try {
   const refusalPage = await fetch(`${BACKEND}/session/unseen`).then((r) => r.text());
   check('refused session page points at Maximum Effort Mode and parses',
     refusalPage.includes('href="#effort"') && !refusalPage.includes('Begin LLM repair') && scriptsCompile(refusalPage) === '', scriptsCompile(refusalPage));
+
+  // === Session page: the route out of a wrong result ==========================
+  // A deterministic automation can run perfectly and return the wrong thing,
+  // so the Run card carries a way into Maximum Effort Mode; the fold opens
+  // for the #effort anchor; the history label counts what the log holds; a
+  // runrow lines its controls up; and the footer names the port in use.
+  // Two sessions of one typed value: ui-run ends with a saved automation,
+  // ui-open never gets one.
+  const ONE = `async function run(ctx) {
+  const res = await ctx.http.fetch('${SITE}/shop?q=' + encodeURIComponent(ctx.inputs.search));
+  const found = [...res.text.matchAll(/<a class="t"[^>]*>([^<]+)<\\/a> <span class="p">([^<]+)<\\/span>/g)];
+  return found.slice(0, 3).map((m) => ({ title: m[1], price: m[2] }));
+}`;
+  const oneEvents = () => [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${SITE}/`, title: 'Shop', lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'hub', target: { tag: 'input', id: 'search', selector: '#search', aria: 'Search' }, seq: 2 },
+    { kind: 'action', action: 'enter', target: { tag: 'input', id: 'search', selector: '#search' }, seq: 3 },
+    { kind: 'nav', url: `${SITE}/shop?q=hub`, transition: 'form_submit', seq: 4 },
+    { kind: 'page', url: `${SITE}/shop?q=hub`, title: 'Shop', lang: 'en', seq: 5 },
+    { kind: 'snapshot', reason: 'load', url: `${SITE}/shop?q=hub`, title: 'Shop', text: textOf(FIRST), html: domOf(FIRST), seq: 6 },
+    { kind: 'snapshot', reason: 'stop', url: `${SITE}/shop?q=hub`, title: 'Shop', text: textOf(FIRST), html: domOf(FIRST), seq: 7 },
+    { kind: 'session_stop', seq: 8 },
+  ];
+  const importInto = (session, text) => fetch(`${BACKEND}/api/sessions/${session}/import`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+  await record('ui-run', oneEvents());
+  // A conversation the operator already had, so the import outcomes below
+  // land on top of it and the label has to choose between the two counts.
+  writeFileSync(join(dataDir, 'ui-run', 'effort.jsonl'), [
+    { kind: 'start', text: new Date().toISOString(), t: 1 },
+    { kind: 'you', text: 'the top 3 listings with title and price', t: 2 },
+    { kind: 'think', text: 'The listing is server-rendered, so fetch the page and parse it.', t: 3 },
+    { kind: 'say', text: 'I will fetch the listing page and read the first three items.', t: 4 },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const convoOnly = await fetch(`${BACKEND}/session/ui-run`).then((r) => r.text());
+  check('history: a conversation alone is counted as messages',
+    convoOnly.includes('Past conversation · 3 messages'), convoOnly.match(/Past conversation[^<]*|History[^<]*/)?.[0]);
+
+  const uiBad = await importInto('ui-run', ONE.replace('encodeURIComponent(ctx.inputs.search)', "'hub'"));
+  check('ui-run: the hard-coded answer is refused, leaving a fail in the log', uiBad.status === 422, JSON.stringify(uiBad.body).slice(0, 200));
+  const uiGood = await importInto('ui-run', ONE);
+  check('ui-run: the one-parameter answer is verified and saved',
+    uiGood.status === 200 && JSON.stringify(uiGood.body.parameters) === '["search"]', JSON.stringify(uiGood.body).slice(0, 300));
+  const uiLog = readLog('ui-run');
+  check('history: a mixed log still counts messages, not entries',
+    uiLog.some((l) => l.kind === 'fail') && uiLog.some((l) => l.kind === 'saved') && uiLog.length > 3 &&
+    (await fetch(`${BACKEND}/session/ui-run`).then((r) => r.text())).includes('Past conversation · 3 messages'),
+    JSON.stringify(uiLog.map((l) => l.kind)));
+
+  await record('ui-open', oneEvents());
+  await importInto('ui-open', ONE.replace('encodeURIComponent(ctx.inputs.search)', "'hub'"));
+  const openPage = await fetch(`${BACKEND}/session/ui-open`).then((r) => r.text());
+  check('history: import outcomes alone are counted as entries', openPage.includes('History · 2 entries'), openPage.match(/Past conversation[^<]*|History[^<]*/)?.[0]);
+
+  const runPage = await fetch(`${BACKEND}/session/ui-run`).then((r) => r.text());
+  check('fold: closed once the session has an automation, open while it has none',
+    /<details class="fold" id="effort">/.test(runPage) && /<details class="fold" id="effort" open>/.test(openPage),
+    `${runPage.match(/<details class="fold" id="effort"[^>]*>/)?.[0]} | ${openPage.match(/<details class="fold" id="effort"[^>]*>/)?.[0]}`);
+  check('the way out of a wrong result is rendered with the Run card, and only with the effort card',
+    runPage.includes('>Not what I wanted?</button>') && runPage.includes('id="to-effort-row"') && !openPage.includes('id="to-effort-row"'));
+  check('session pages still parse', scriptsCompile(runPage) === '' && scriptsCompile(openPage) === '', scriptsCompile(runPage) || scriptsCompile(openPage));
+
+  // The import note: our own rejections carry `error`, Fastify's own bodies
+  // carry the line worth reading in `message`, and a 409 is not the answer's
+  // fault so it is a warning with nothing to paste back.
+  const malformed = await fetch(`${BACKEND}/api/sessions/ui-run/import`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":',
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  check('import: a body Fastify itself rejects answers in its own shape, where `message` is the useful line',
+    malformed.status === 400 && typeof malformed.body.message === 'string' && malformed.body.message !== malformed.body.error,
+    JSON.stringify(malformed.body));
+  check('the import note prefers that message, then our error, then the status, and warns rather than fails on a 409',
+    runPage.includes("res.message || res.error || ('HTTP ' + r.status)") && runPage.includes("r.status === 409") &&
+    runPage.includes("e.message || e.error || ('HTTP ' + r.status)"));
+
+  check('the sidebar names the port actually serving the page',
+    runPage.includes(`<div class="side-foot mono">127.0.0.1:${BACKEND_PORT}</div>`) && !runPage.includes('4823'),
+    runPage.match(/<div class="side-foot[^>]*>[^<]*</)?.[0]);
+
+  // In a real browser: run, reject the result, land in the fold with the goal
+  // focused; the #effort anchor opens it on its own; the runrow controls sit
+  // on one line.
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1000, height: 420 } });
+    await page.goto(`${BACKEND}/session/ui-run`);
+    check('browser: the way out waits for a result', await page.isHidden('#to-effort-row'));
+    await page.click('#run-btn');
+    await page.waitForSelector('#to-effort-row', { state: 'visible', timeout: 20000 });
+    const before = await page.evaluate(() => ({
+      open: document.getElementById('effort').open,
+      top: document.getElementById('effort').getBoundingClientRect().top,
+      h: innerHeight,
+    }));
+    check('browser: the result renders with the fold closed and out of sight',
+      !before.open && before.top >= before.h, JSON.stringify(before));
+    await page.click('#to-effort');
+    await page.waitForFunction(() => {
+      const r = document.getElementById('effort').getBoundingClientRect();
+      return r.top >= 0 && r.top < innerHeight - 40;
+    }, null, { timeout: 5000 }).catch(() => {});
+    const after = await page.evaluate(() => {
+      const r = document.getElementById('effort').getBoundingClientRect();
+      return { open: document.getElementById('effort').open, top: r.top, h: innerHeight, focus: document.activeElement.id };
+    });
+    check('browser: "Not what I wanted?" opens the fold, scrolls to it and focuses the goal',
+      after.open && after.top >= 0 && after.top < after.h - 40 && after.focus === 'effort-goal', JSON.stringify(after));
+
+    // Both segs, the Export brief button and the pills beside them: centres
+    // within 2px of the control they sit next to.
+    const mids = await page.evaluate(() => {
+      const mid = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const row = document.getElementById('brief-btn').parentElement;
+      const head = document.getElementById('seg-single').closest('.card-head');
+      return {
+        briefSeg: mid(row.querySelector('.seg')), briefBtn: mid(document.getElementById('brief-btn')), briefPill: mid(row.querySelector('.pw')),
+        headSeg: mid(head.querySelector('.seg')), headTitle: mid(head.querySelector('h2')), headPill: mid(head.querySelector('.pw')),
+      };
+    });
+    const near = (a, b) => Math.abs(a - b) <= 2;
+    check('browser: the brief row lines the seg, the button and the pill up',
+      near(mids.briefSeg, mids.briefBtn) && near(mids.briefPill, mids.briefBtn), JSON.stringify(mids));
+    check('browser: the Run card head lines the seg, the heading and the pill up',
+      near(mids.headSeg, mids.headTitle) && near(mids.headPill, mids.headTitle), JSON.stringify(mids));
+
+    await page.goto(`${BACKEND}/session/ui-run#effort`);
+    await page.waitForFunction(() => document.getElementById('effort').open, null, { timeout: 5000 }).catch(() => {});
+    check('browser: the #effort anchor opens the closed fold on load',
+      await page.evaluate(() => document.getElementById('effort').open));
+
+    await page.goto(`${BACKEND}/session/ui-open`);
+    check('browser: a session with no automation lands with the fold already open',
+      await page.evaluate(() => document.getElementById('effort').open && !document.getElementById('to-effort-row')));
+
+    // The whole paste-and-save flow from the anchor, which is where "View &
+    // run" has to escape the hash to reach the automation it just saved.
+    const briefed = await fetch(`${BACKEND}/api/sessions/ui-open/brief?probe=0`);
+    await briefed.text();
+    check('the brief marks the session as exported', briefed.status === 200 && readMeta('ui-open').briefAt > 0, String(briefed.status));
+    // Via another page: a goto that only changes the hash does not reload.
+    await page.goto(`${BACKEND}/session/ui-run`);
+    await page.goto(`${BACKEND}/session/ui-open#effort`);
+    check('browser: the paste box is on the page once a brief exists', await page.isVisible('#import-text'));
+    await page.fill('#import-text', ONE);
+    await page.click('#import-btn');
+    await page.waitForSelector('#import-out .ok-note', { timeout: 30000 });
+    await page.click('#import-out button');
+    await page.waitForSelector('#run-btn', { timeout: 10000 });
+    check('browser: "View & run" leaves #effort behind and lands on the Run card',
+      new URL(page.url()).hash === '' && await page.evaluate(() => !document.getElementById('effort').open),
+      page.url());
+  } finally {
+    await browser.close();
+  }
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

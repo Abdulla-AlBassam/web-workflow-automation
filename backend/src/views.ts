@@ -151,6 +151,10 @@ textarea:disabled, input:disabled { opacity:.45; }
 .runrow { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
 .runrow label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--ink-2); flex:1 1 200px; min-width:0; overflow-wrap:anywhere; }
 .runrow input { font-variant-numeric:tabular-nums; width:100%; min-width:0; }
+/* A runrow bottom-aligns so a labelled field lines up with its button; a seg
+   or a pill is shorter than a button and would sit low, so give it the button
+   box and centre it inside. */
+.runrow > .seg, .runrow > .pw { min-height:34px; align-items:center; }
 .lbl { display:block; font-size:12px; color:var(--ink-2); margin:12px 0 4px; }
 .rename-input { font:inherit; font-size:15px; font-weight:600; min-width:280px; padding:4px 8px; }
 
@@ -245,7 +249,7 @@ function ago(ts: number): string {
   return d === 1 ? 'yesterday' : d < 7 ? `${d}d ago` : new Date(ts).toLocaleDateString('en-GB');
 }
 
-function sidebar(sessions: (Meta & { st: string })[], active?: string): string {
+function sidebar(sessions: (Meta & { st: string })[], host: string, active?: string): string {
   const items = [...sessions]
     .sort((a, b) => b.startedAt - a.startedAt)
     .map((m) => `<a class="side-item${m.session === active ? ' on' : ''}" href="/session/${esc(m.session)}">
@@ -258,7 +262,7 @@ function sidebar(sessions: (Meta & { st: string })[], active?: string): string {
     <div class="side-head">${LOGO}<span>Workflow Recorder</span></div>
     <div class="side-label">Sessions</div>
     <nav class="side-list">${items}</nav>
-    <div class="side-foot mono">127.0.0.1:4823</div>
+    ${host ? `<div class="side-foot mono">${esc(host)}</div>` : ''}
   </aside>`;
 }
 
@@ -299,11 +303,11 @@ function shell(title: string, side: string, main: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}</style></head><body>${side}<div class="main"><main class="wrap">${main}</main></div>${SHELL_SCRIPT}</body></html>`;
 }
 
-export function renderList(sessions: (Meta & { st: string })[]): string {
+export function renderList(sessions: (Meta & { st: string })[], host: string): string {
   const hint = sessions.length
     ? 'Pick a recording from the sidebar.'
     : 'None recorded yet. Open the Workflow Recorder extension on the target site and start recording.';
-  return shell('Workflow Recorder', sidebar(sessions), `
+  return shell('Workflow Recorder', sidebar(sessions, host), `
     <div class="empty-pane">
       <svg width="40" height="40" viewBox="0 0 15 15" aria-hidden="true"><rect x="0" y="0" width="4" height="4" rx="1" fill="currentColor"/><rect x="5.5" y="0" width="4" height="4" rx="1" fill="currentColor" opacity=".45"/><rect x="11" y="0" width="4" height="4" rx="1" fill="currentColor" opacity=".2"/><rect x="0" y="5.5" width="4" height="4" rx="1" fill="currentColor" opacity=".45"/><rect x="5.5" y="5.5" width="4" height="4" rx="1" fill="currentColor"/><rect x="11" y="5.5" width="4" height="4" rx="1" fill="currentColor" opacity=".45"/><rect x="0" y="11" width="4" height="4" rx="1" fill="currentColor" opacity=".2"/><rect x="5.5" y="11" width="4" height="4" rx="1" fill="currentColor" opacity=".45"/><rect x="11" y="11" width="4" height="4" rx="1" fill="currentColor"/></svg>
       <h1>Select a session</h1>
@@ -337,7 +341,7 @@ function timelineRow(e: Record<string, unknown>): string {
   return `<li><span>${tag}</span><span class="body">${body}</span></li>`;
 }
 
-export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record<string, unknown>[], spec: any | undefined, script: string | undefined, log: Record<string, unknown>[], sessions: (Meta & { st: string })[]): string {
+export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record<string, unknown>[], spec: any | undefined, script: string | undefined, log: Record<string, unknown>[], sessions: (Meta & { st: string })[], host: string): string {
   // The operator's story, not the raw stream: keep actions, navigation, the
   // outcome calls (search, and the chained detail when present) and lifecycle
   // markers; drop the dropdown-population noise.
@@ -363,14 +367,14 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
     <td class="sub">${esc(c.resultShape ?? '')}</td>
   </tr>`).join('');
 
-  const specCards = spec ? renderSpec(spec, meta.session, a.marks.length, script) : `<div class="card">
+  const specCards = spec ? renderSpec(spec, meta.session, a.marks.length, script, st === 'complete') : `<div class="card">
     <div class="card-head"><h2>Automation</h2></div>
     <p class="note" style="margin-top:10px">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p>
     ${st === 'complete' ? `<p class="sub" style="margin-top:10px">The deterministic analyser found no direct call to promote. <a href="#effort">Maximum Effort Mode</a> below reads the pages you saw and works out how to reach the result you want.</p>` : ''}
   </div>`;
   const effortCard = st === 'complete' ? renderEffort(meta, log, !!spec) : '';
 
-  return shell(`${meta.name ?? meta.session}`, sidebar(sessions, meta.session), `
+  return shell(`${meta.name ?? meta.session}`, sidebar(sessions, host, meta.session), `
     <script>
     // LLM adjust: stream the loop's NDJSON lines into a visible console so
     // the operator watches every diagnosis, proposal, and verification.
@@ -430,7 +434,9 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
         view.className = 'btn';
         view.style.marginTop = '10px';
         view.textContent = 'View & run the automation';
-        view.addEventListener('click', () => location.reload());
+        // Without the hash: an operator who arrived at #effort would otherwise
+        // reload straight back into the fold, past the automation just saved.
+        view.addEventListener('click', () => location.assign(location.pathname));
         after.append(view);
       }
       return savedOk;
@@ -454,6 +460,19 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
       tick();
       const iv = setInterval(tick, 100);
       return () => clearInterval(iv);
+    };
+    // Every "this is not what I wanted" route ends at the same fold: the run
+    // result's escape hatch, the refusal card's link, a bookmarked #effort.
+    // A hash cannot open a closed <details>, so it is opened here.
+    window.openEffort = () => {
+      const fold = document.getElementById('effort');
+      if (!fold) return false;
+      fold.open = true;
+      const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      fold.scrollIntoView({ block: 'start', behavior: still ? 'auto' : 'smooth' });
+      const goal = document.getElementById('effort-goal');
+      if (goal) goal.focus({ preventScroll: true });
+      return true;
     };
     </script>
     <div class="card page-head">
@@ -535,7 +554,7 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
     </script>`);
 }
 
-function renderSpec(spec: any, session: string, marksCount = 0, script?: string): string {
+function renderSpec(spec: any, session: string, marksCount = 0, script?: string, hasEffort = false): string {
   const flow = spec.steps.map((s: any) =>
     `<span class="step">${esc(s.id)}<span class="sub"> · ${esc(s.type)}</span></span>`
   ).join('<span class="arrow">→</span>');
@@ -603,6 +622,7 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string)
     <div id="pane-single" style="margin-top:12px">
       <div class="runrow">${inputs}<button id="run-btn" class="btn">${PLAY}Run</button></div>
       <div id="run-out"></div>
+      ${hasEffort ? `<div id="to-effort-row" style="margin-top:10px" hidden><button id="to-effort" class="btn btn-quiet">Not what I wanted?</button></div>` : ''}
       <div id="fix-block" class="fix-block" hidden>
         <div class="card-head"><h2 style="font-size:12px">Adjust</h2>
         ${pill('i', '<p>Not what you wanted? For a small adjustment (fewer fields, a missing column) describe it here; the assistant changes the automation and verifies it against your recording before anything is saved.</p><p>For anything bigger, use <b>Maximum Effort Mode</b> below.</p>', 'About adjusting the automation')}</div>
@@ -761,6 +781,10 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string)
 
     const btn = document.getElementById('run-btn');
     const out = document.getElementById('run-out');
+    // The deterministic automation can run perfectly and still return the
+    // wrong thing; that verdict is only possible once a result is on screen.
+    const toEffort = document.getElementById('to-effort-row');
+    if (toEffort) toEffort.querySelector('button').addEventListener('click', () => openEffort());
     let lastRun;
     btn.addEventListener('click', async () => {
       btn.disabled = true;
@@ -780,6 +804,7 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string)
           firstRow: first && Object.fromEntries(Object.entries(first).map(([k, v]) => [k, String(v ?? '').slice(0, 120)])),
         };
         document.getElementById('fix-block').hidden = false;
+        if (toEffort) toEffort.hidden = false;
       } catch (e) {
         stopTimer();
         out.innerHTML = '<p class="fail-note">✗ Could not reach the local backend: ' + esc(e.message) + '</p>';
@@ -885,6 +910,8 @@ function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boole
     const block = document.getElementById('import-block');
     const full = document.getElementById('brief-full');
     const chat = document.getElementById('brief-chat');
+    if (location.hash === '#effort') openEffort();
+    addEventListener('hashchange', () => { if (location.hash === '#effort') openEffort(); });
     let budget = ${4 * 1024 * 1024};
     full.addEventListener('click', () => { full.classList.add('on'); chat.classList.remove('on'); budget = ${4 * 1024 * 1024}; });
     chat.addEventListener('click', () => { chat.classList.add('on'); full.classList.remove('on'); budget = ${600 * 1024}; });
@@ -898,7 +925,7 @@ function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boole
         });
         if (!r.ok) {
           const e = await r.json().catch(() => ({}));
-          throw new Error(e.error || ('HTTP ' + r.status));
+          throw new Error(e.message || e.error || ('HTTP ' + r.status));
         }
         const md = await r.text();
         const a = document.createElement('a');
@@ -927,7 +954,7 @@ function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boole
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ text }),
         });
-        const res = await r.json();
+        const res = await r.json().catch(() => ({}));
         stopTimer();
         if (r.ok) {
           let html = '<p class="ok-note">✓ ' + esc(res.text) + '</p>';
@@ -937,10 +964,17 @@ function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boole
           view.className = 'btn';
           view.style.marginTop = '10px';
           view.textContent = 'View & run the automation';
-          view.addEventListener('click', () => location.reload());
+          view.addEventListener('click', () => location.assign(location.pathname));
           out.append(view);
         } else {
-          out.innerHTML = '<p class="fail-note">✗ ' + esc(res.error || ('HTTP ' + r.status)) + '</p><p class="sub" style="margin-top:6px">Paste this reason back to the model and try its next answer here.</p>';
+          // Our own rejections carry the reason in "error"; Fastify's default
+          // bodies (a malformed or oversized paste) carry it in "message".
+          const why = res.message || res.error || ('HTTP ' + r.status);
+          // A 409 means something else is using the session, not that the
+          // answer was wrong, so it is a warning with nothing to paste back.
+          out.innerHTML = r.status === 409
+            ? '<p class="note">' + esc(why) + '</p>'
+            : '<p class="fail-note">✗ ' + esc(why) + '</p><p class="sub" style="margin-top:6px">Paste this reason back to the model and try its next answer here.</p>';
         }
       } catch (e) {
         stopTimer();

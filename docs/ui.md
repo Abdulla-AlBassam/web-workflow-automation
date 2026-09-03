@@ -20,6 +20,16 @@ We write vanilla HTML/CSS (no component library, the surfaces are small). beauti
 - Loading: 3x3 pixel-grid loader (`pixel-on` 650ms, chevron wavefront delays) + shimmer label + elapsed timer. No rotating spinners anywhere.
 - Status dots: green complete, red interrupted, pulsing red recording. The word sits next to the dot; motion is never the only channel.
 
+## Maximum Effort card
+
+- Last card on the session page, `id="effort"`. Open when the session has no automation, closed when it has one.
+- Goal textarea first, then the brief row: Full | Chat-sized seg, Export brief, an "i" pill, the export status.
+- The paste box and Verify & save appear only once a brief has been exported.
+- A verified answer gets an ok note and a "View & run" button that reloads the page. A rejection gets a fail note carrying the exact reason, plus the line telling the operator to paste it back. A 409 is a warning note with nothing to paste back.
+- Past entries sit in a `fold-sub`: "Past conversation · N messages" when the log holds model or operator messages, "History · N entries" when it holds import outcomes only.
+- "Not what I wanted?" (`btn btn-quiet`) sits under a run result in the Run card, and only when this card is on the page. It opens the fold, scrolls to it and focuses the goal.
+- `#effort` in the URL opens the fold on load and on hashchange: a hash alone cannot open a closed `details`.
+
 ## Rules
 
 - Everything appears only when it is needed: warnings only when warranted, Adjust only after a run, Bulk only for single-parameter specs, dropped-events chip only when non-zero.
