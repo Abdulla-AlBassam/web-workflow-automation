@@ -5,14 +5,14 @@ import { repairSession } from './repair.js';
 import { Inbox, maxEffort } from './effort.js';
 import { buildBrief, DEFAULT_BUDGET } from './brief.js';
 import { checkCandidate, loadEvidence, parseCandidate, saveCandidate } from './candidate.js';
+import { parseEnv } from './env.js';
 
 // Local secrets (ANTHROPIC_API_KEY for the repair assistant) live in the
 // project's .env, which is gitignored. Environment always wins.
 const envFile = new URL('../../.env', import.meta.url);
 if (existsSync(envFile)) {
-  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+  for (const [key, value] of Object.entries(parseEnv(readFileSync(envFile, 'utf8')))) {
+    if (process.env[key] === undefined) process.env[key] = value;
   }
 }
 import { sanitise } from './redact.js';
@@ -28,6 +28,13 @@ import { runScript } from '../../runner/src/script.js';
 // Captured bodies travel in event batches: a large JSON response must not be
 // refused at the door.
 const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 64 * 1024 * 1024 });
+
+// So `curl --data-binary @answer.md -H 'content-type: text/plain'` reaches the
+// import route with the model's reply, and the brief route with the goal: for
+// both, a plain-text body is the whole value.
+for (const type of ['text/plain', 'text/markdown']) {
+  app.addContentTypeParser(type, { parseAs: 'string' }, (_req, body, done) => done(null, body));
+}
 
 app.get('/health', async () => ({ ok: true }));
 
@@ -180,6 +187,8 @@ app.post('/api/sessions/:id/spec', async (req, reply) => {
   }
 });
 
+const IMPORT_RUNNING = 'an answer is already being verified for this session — wait for it to finish';
+
 // Operator-triggered LLM repair. The response is a live NDJSON stream: one
 // {kind, text} line per step, so the session page can show the loop as it
 // runs. Closing the page aborts the loop.
@@ -190,6 +199,7 @@ app.post('/api/sessions/:id/repair', async (req, reply) => {
   // and, optionally, the operator's note on what was wrong with it.
   const { feedback, lastRun } = (req.body ?? {}) as { feedback?: string; lastRun?: unknown };
   if (repairs.has(id)) return reply.code(409).send({ error: 'a repair is already running for this session' });
+  if (imports.has(id)) return reply.code(409).send({ error: IMPORT_RUNNING });
   reply.hijack();
   const raw = reply.raw;
   raw.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
@@ -235,6 +245,7 @@ app.post('/api/sessions/:id/effort', async (req, reply) => {
   if (!getMeta(id)) return reply.code(404).send({ error: 'unknown session' });
   const { goal } = (req.body ?? {}) as { goal?: string };
   if (efforts.has(id)) return reply.code(409).send({ error: 'Maximum Effort Mode is already running for this session' });
+  if (imports.has(id)) return reply.code(409).send({ error: IMPORT_RUNNING });
   reply.hijack();
   const raw = reply.raw;
   raw.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
@@ -308,6 +319,10 @@ async function sendBrief(id: string, reply: FastifyReply, goal: string | undefin
   return reply.type('text/markdown; charset=utf-8').header('content-disposition', `attachment; filename="${id}-brief.md"`).send(md);
 }
 
+// A GET that writes, deliberately: exporting is the act of handing the
+// recording to a model, so it saves BRIEF.md beside the recording and stamps
+// meta.briefAt, which is what reveals the paste box on the session page. An
+// operator who exported with curl comes back to a page ready for the answer.
 app.get('/api/sessions/:id/brief', async (req, reply) => {
   const { id } = req.params as { id: string };
   return sendBrief(id, reply, undefined, (req.query ?? {}) as { budget?: unknown; probe?: unknown });
@@ -315,6 +330,7 @@ app.get('/api/sessions/:id/brief', async (req, reply) => {
 
 app.post('/api/sessions/:id/brief', async (req, reply) => {
   const { id } = req.params as { id: string };
+  if (typeof req.body === 'string') return sendBrief(id, reply, req.body, {});
   const { goal, budget, probe } = (req.body ?? {}) as { goal?: unknown; budget?: unknown; probe?: unknown };
   return sendBrief(id, reply, typeof goal === 'string' ? goal : undefined, { budget, probe });
 });
@@ -324,27 +340,45 @@ app.post('/api/sessions/:id/brief', async (req, reply) => {
 // verifies a write_script; a pass becomes the session's automation, a fail
 // is a 422 carrying the same rejection text the loop would feed the model,
 // so the operator pastes it straight back. Both outcomes go in the log.
+// Verification runs the script for up to two minutes, so the session is held
+// for the duration: the import route, Adjust and Maximum Effort Mode all
+// write the same spec.json and automation.mjs, and the last writer would win.
+const imports = new Set<string>();
 app.post('/api/sessions/:id/import', async (req, reply) => {
   const { id } = req.params as { id: string };
   if (!getMeta(id)) return reply.code(404).send({ error: 'unknown session' });
+  const clash = imports.has(id) ? IMPORT_RUNNING
+    : repairs.has(id) ? 'a repair is running for this session — wait for it to finish'
+    : efforts.has(id) ? 'Maximum Effort Mode is running for this session — wait for it to finish'
+    : undefined;
+  if (clash) return reply.code(409).send({ error: clash });
   const ev = loadEvidence(id);
   if ('error' in ev) return reply.code(409).send({ error: ev.error });
-  const body = (req.body ?? {}) as Record<string, unknown>;
-  const answer = typeof body.text === 'string' ? body.text : JSON.stringify(body);
+  const body = req.body ?? {};
+  const given = typeof body === 'object' ? (body as { text?: unknown }).text : undefined;
+  if (given !== undefined && typeof given !== 'string') return reply.code(422).send({ error: 'REJECTED: "text" must be a string carrying the model\'s reply' });
+  // A text/plain body is the reply itself; a JSON body carries it in "text",
+  // or is the answer block on its own.
+  const answer = typeof body === 'string' ? body : typeof given === 'string' ? given : JSON.stringify(body);
   const candidate = parseCandidate(answer, ev);
   if ('error' in candidate) return reply.code(422).send({ error: `REJECTED: ${candidate.error}` });
   const params = candidate.parameters.map((p) => `${p.name}="${p.example}"`).join(', ') || 'none';
   appendLog(id, { kind: 'info', text: `Answer from an external model imported for verification${candidate.title ? `: "${candidate.title}"` : ''}; parameters ${params}.`, t: Date.now() });
-  const v = await checkCandidate(candidate, ev, cachedReadToken);
-  if (!v.ok) {
-    appendLog(id, { kind: 'fail', text: v.reason, t: Date.now() });
-    return reply.code(422).send({ error: `REJECTED: ${v.reason}` });
+  imports.add(id);
+  try {
+    const v = await checkCandidate(candidate, ev, cachedReadToken);
+    if (!v.ok) {
+      appendLog(id, { kind: 'fail', text: v.reason, t: Date.now() });
+      return reply.code(422).send({ error: `REJECTED: ${v.reason}` });
+    }
+    const { columns } = saveCandidate(ev, candidate, v.run, { model: 'external', mode: 'import' }, v.robots);
+    for (const r of v.robots) appendLog(id, { kind: 'info', text: r, t: Date.now() });
+    const text = `Automation ${candidate.title ? `saved as "${candidate.title}"` : 'saved'} — ${v.note}; ${v.run.rows.length} row(s) with columns ${columns.join(', ')}; parameters ${candidate.parameters.map((p) => p.name).join(', ') || 'none'}; hosts ${v.run.hosts.join(', ') || 'none'}.`;
+    appendLog(id, { kind: 'saved', text, t: Date.now() });
+    return { ok: true, text, title: candidate.title, note: v.note, rows: v.run.rows.length, columns, parameters: candidate.parameters.map((p) => p.name), hosts: v.run.hosts, robots: v.robots };
+  } finally {
+    imports.delete(id);
   }
-  const { columns } = saveCandidate(ev, candidate, v.run, { model: 'external', mode: 'import' }, v.robots);
-  for (const r of v.robots) appendLog(id, { kind: 'info', text: r, t: Date.now() });
-  const text = `Automation ${candidate.title ? `saved as "${candidate.title}"` : 'saved'} — ${v.note}; ${v.run.rows.length} row(s) with columns ${columns.join(', ')}; parameters ${candidate.parameters.map((p) => p.name).join(', ') || 'none'}; hosts ${v.run.hosts.join(', ') || 'none'}.`;
-  appendLog(id, { kind: 'saved', text, t: Date.now() });
-  return { ok: true, text, title: candidate.title, note: v.note, rows: v.run.rows.length, columns, parameters: candidate.parameters.map((p) => p.name), hosts: v.run.hosts, robots: v.robots };
 });
 
 // Tokens are cached per origin so bulk runs pay the browser-launch cost once,

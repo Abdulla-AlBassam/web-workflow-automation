@@ -175,28 +175,41 @@ and the acceptance rules the answer will be held to; the answer format; and
 the sanitised recording, in order of worth: the route with the query
 parameters that changed at each step (a sort, a filter, a price bound shows
 up here by name), every typed value with the page's own label and a
-suggested parameter name, marks and clicked results, the analyser's verdict
-flagged as a guess, a plain-fetch check of each visited page (status, size,
-whether the visible results are in the plain response, and the site's
-robots.txt rule if one applies), the recording in order, every page
-snapshot's text, the last page's pruned DOM and the last page as a plain
-fetch returns it, and the captured calls in full with their request and
-response headers, those carrying a typed value or structured records first.
-"Full" is capped at 4 MB, for an agent that reads files; "Chat-sized" at
-600 KB, for a chat window; `?budget=` on the API takes any size. What the
-budget cut is listed at the end, never dropped silently. The file is also
-written as `BRIEF.md` in the session folder. Snapshots show whatever was on
-the screen.
+suggested parameter name, marks and clicked results (a table header row
+marked by mistake is listed as ignored, and the acceptance does not ask for
+it), the analyser's verdict flagged as a guess, the automation the session
+already has, and what a plain fetch gets today: each visited page with its
+status and size and whether the visible results are in the plain response,
+a bot wall or a redirect to a login page named for what it is, the site's
+robots.txt rule where one applies, and each call that carried a typed value
+replayed without credentials, so the brief says plainly whether the outcome
+call is gated and how to obtain the site's anonymous bearer if it is.
+
+Then the bodies: the recording in order, the last page's text and pruned
+DOM, the pages before it, anything the page pulled in through a script tag
+(fetched at export, since the recorder only saw the URL, and usually JSONP),
+and the captured calls in full with their request and response headers,
+those carrying a typed value or structured records first. The last page as a
+plain fetch returns it sits with the snapshots when that page is where the
+results are, and after the calls when they are not. "Full" is capped at
+4 MB, for an agent that reads files; "Chat-sized" at 600 KB, for a chat
+window, where no single item may take more than a quarter of the budget and
+the session folder is named relative to the repository rather than from a
+home directory; `?budget=` on the API takes any size. What the budget cut is
+listed at the end, never dropped silently. The file is also written as
+`BRIEF.md` in the session folder. Snapshots show whatever was on the screen.
 
 Paste the answer back. The model answers with one JSON block: title,
 summary, parameters with the recorded values as examples, any typed value
-it chose to fix, and the script. The tool reads that block out of the whole
-reply (a bare script is accepted too, with the typed values as its
+it chose to fix, and the script as one string. The tool reads that block out
+of the whole reply (the last block carrying a script, when the model showed
+the shape first; a bare script is accepted too, with the typed values as its
 parameters) and verifies it exactly as the API loop verified its own
 attempts. A pass becomes the session's automation, with "external model"
 as its provenance, and the Run card takes over. A fail shows the exact
-rejection text, ready to paste back to the model. Both outcomes are kept
-in the session's history.
+rejection text, ready to paste back to the model: a bad block is named by
+its position in the reply and the position of the error in it. Both
+outcomes are kept in the session's history.
 
 With Claude Code or another agent working in this repository: open the
 session folder (`backend/data/<session>/`), read `BRIEF.md`, write
@@ -210,6 +223,12 @@ npm run verify -- <session>
 until it prints PASS, then `npm run verify -- <session> --save`. The same
 command takes a whole reply file or a JSON block as its second argument.
 Exit codes: 0 PASS, 1 REJECTED, 2 usage.
+
+From any other tool, both steps are one curl each: `curl -s
+'http://127.0.0.1:4823/api/sessions/<session>/brief?budget=600000' -o
+brief.md` exports it, and `curl --data-binary @answer.md -H 'content-type:
+text/plain' http://127.0.0.1:4823/api/sessions/<session>/import` verifies
+the reply, answering 200 with what was saved or 422 with the rejection.
 
 The script is plain JavaScript, `async function run(ctx)`, taking the
 parameters the model declares (named as a person would: `query`,
@@ -264,10 +283,11 @@ in `.env` is needed for Adjust only.
 - Every run is started by a person. Stopping a recording sends one
   request on its own: the recorded outcome call, replayed with the page's
   own headers but without credentials, so the generator learns whether a
-  token step is needed. Exporting a brief fetches each visited page once
-  and each host's robots.txt, without cookies (`probe=0` skips it), and
-  accepting a script fetches robots.txt for the hosts it reached.
-  Test suites use local fixtures only.
+  token step is needed. Exporting a brief fetches each visited page once,
+  replays the calls that carried a typed value without credentials, fetches
+  any script-tag URL that carried one, and reads each host's robots.txt,
+  all without cookies (`probe=0` skips it); accepting a script fetches
+  robots.txt for the hosts it reached. Test suites use local fixtures only.
 - The one authenticated call in the Sijilat demonstration uses the
   anonymous token the site issues to every visitor. The runner reads it; it
   never derives or submits a credential.

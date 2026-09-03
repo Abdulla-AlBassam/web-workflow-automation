@@ -11,7 +11,7 @@
 // an answer pasted back is held to the same acceptance (page route and
 // CLI), and the site's robots.txt is reported, never enforced.
 // Run: node e2e/effort.e2e.mjs
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
@@ -65,6 +65,26 @@ function listing(q, min) {
 const site = createServer((req, res) => {
   const url = new URL(req.url, SITE);
   if (url.pathname === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('User-agent: *\nDisallow: /shop\nDisallow: /private/\n'); return; }
+  // Pages a plain fetch cannot have: a wall, a challenge, and one that bounces
+  // to a sign-in.
+  if (url.pathname === '/walled') { res.writeHead(403, { 'content-type': 'text/html' }); res.end('<html><body><h1>Forbidden</h1></body></html>'); return; }
+  if (url.pathname === '/challenge') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><h1>Just a moment…</h1><p>Checking your browser before you proceed.</p></body></html>'); return; }
+  if (url.pathname === '/members') { res.writeHead(302, { location: `${SITE}/login?returnUrl=/members` }); res.end(); return; }
+  if (url.pathname === '/login') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><h1>Sign in</h1></body></html>'); return; }
+  // The listing as an API, gated the way a site gates its own.
+  if (url.pathname === '/api/gated') {
+    if (!req.headers.authorization) { res.writeHead(401, { 'content-type': 'application/json' }); res.end('{"error":"unauthorized"}'); return; }
+    const q = url.searchParams.get('q') ?? '';
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ results: ITEMS.filter((i) => i.kind.includes(q)).map((i) => ({ name: i.title, price: i.price })) }));
+    return;
+  }
+  // What the recorder cannot capture: data pulled in through a <script> tag.
+  if (url.pathname === '/jsonp') {
+    res.writeHead(200, { 'content-type': 'application/javascript' });
+    res.end(`${url.searchParams.get('callback') ?? 'cb'}(${JSON.stringify({ q: url.searchParams.get('q'), suggestions: ITEMS.slice(0, 2).map((i) => i.title) })});`);
+    return;
+  }
   res.writeHead(200, { 'content-type': 'text/html' });
   if (url.pathname === '/shop') { res.end(listing(url.searchParams.get('q') ?? '', Number(url.searchParams.get('min') ?? 0))); return; }
   res.end('<html><body><h1>Shop</h1><form><input id="search" aria-label="Search"></form></body></html>');
@@ -573,6 +593,237 @@ try {
   } finally {
     await browser.close();
   }
+  // ==========================================================================
+  // Bring your own model: what the brief spends its budget on, what it says
+  // about pages and calls it cannot reach, and what the routes refuse.
+  // ==========================================================================
+
+  // A recording whose first page is enormous: the page the operator ended on
+  // must survive the budget, the one they passed through may be cut.
+  const PAD = Array.from({ length: 4_000 }, (_, i) => `padding line ${i} of a very long first page`).join('\n');
+  const bigEvents = shopEvents();
+  bigEvents[6] = { ...bigEvents[6], text: `${textOf(FIRST)}\n${PAD}` };
+  await record('big', bigEvents);
+  const beforeExport = await fetch(`${BACKEND}/session/big`).then((r) => r.text());
+  const bigFull = await fetch(`${BACKEND}/api/sessions/big/brief?probe=0`).then((r) => r.text());
+  const bigChat = await fetch(`${BACKEND}/api/sessions/big/brief?probe=0&budget=300000`).then((r) => r.text());
+  check('budget: a chat-sized brief keeps the last page whole and cuts the huge earlier one',
+    bigChat.length <= 300_000 && bigChat.includes('### Snapshot #12 (stop) — visible text') &&
+    bigChat.includes('CalDigit Element Hub $189') && bigChat.includes('3 results') &&
+    /snapshot #6 text: (cut at \d+ of \d+ chars|left out entirely)/.test(bigChat),
+    `${bigChat.length} chars; ${bigChat.match(/## Left out by the budget[\s\S]{0,300}/)?.[0]}`);
+  check('budget: the last page comes before the pages the operator passed through',
+    bigChat.indexOf('### Snapshot #12 (stop)') < bigChat.indexOf('### Snapshot #6 (load)') &&
+    bigChat.indexOf('### Snapshot #12 — pruned HTML') < bigChat.indexOf('### Snapshot #6 (load)'),
+    `#12 text ${bigChat.indexOf('### Snapshot #12 (stop)')}, #12 html ${bigChat.indexOf('### Snapshot #12 — pruned HTML')}, #6 ${bigChat.indexOf('### Snapshot #6 (load)')}`);
+  const cutAt = Number(bigChat.match(/CUT HERE by the brief's budget: (\d+) of \d+/)?.[1] ?? 0);
+  check('budget: no single item takes more than a quarter of a chat-sized brief', cutAt > 0 && cutAt <= 300_000 / 4, String(cutAt));
+  check('budget: the full export cuts nothing and carries the whole first page',
+    bigFull.includes('Nothing: the whole recording fit') && bigFull.includes('padding line 3999 of a very long first page'), bigFull.length + ' chars');
+  check('brief: the contract names the whole context a script gets, and what is refused in code',
+    bigFull.includes("The context has JavaScript's own intrinsics plus URL and URLSearchParams and nothing else: no timers, no fetch, no TextEncoder, no structuredClone.") &&
+    bigFull.includes('process, globalThis, eval, Function(), Reflect, Proxy, constructor, prototype and __proto__ are refused in code'),
+    bigFull.match(/## The script[\s\S]{0,500}/)?.[0]);
+  check('brief: the task says what the recording deliberately does not carry',
+    bigFull.includes('Hidden form values are named in the recording but never kept') &&
+    bigFull.includes('fetch the form page at run time and read the current values out of it with ctx.dom before submitting') &&
+    bigFull.includes("lists the page's web-storage key NAMES only, never their values") &&
+    bigFull.includes('read it at run time with ctx.site.token(pageUrl)'),
+    bigFull.match(/^\d\. Hidden form values[\s\S]{0,600}/m)?.[0]);
+  const chatFolder = bigChat.match(/Session folder[^\n]*/)?.[0] ?? '';
+  const fullFolder = bigFull.match(/Session folder[^\n]*/)?.[0] ?? '';
+  check('budget: the chat-sized brief names the session folder relative to the repository, not from a home directory',
+    fullFolder === `Session folder on the operator's machine: ${join(dataDir, 'big')}` &&
+    chatFolder.startsWith('Session folder, relative to the repository root: ') && !chatFolder.includes(`: ${dataDir}`),
+    `${fullFolder} | ${chatFolder}`);
+  const afterExport = await fetch(`${BACKEND}/session/big`).then((r) => r.text());
+  check('a GET export leaves the page ready for the answer',
+    beforeExport.includes('id="import-block" hidden') && afterExport.includes('<div id="import-block">') &&
+    readMeta('big').briefAt > 0 && existsSync(join(dataDir, 'big', 'BRIEF.md')), `${readMeta('big').briefAt}`);
+
+  // Pages a plain fetch cannot have: the brief must say which, not "the
+  // content is missing".
+  await record('walls', [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${SITE}/`, title: 'Shop', lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'hub', target: { tag: 'input', id: 'search', selector: '#search' }, seq: 2 },
+    { kind: 'nav', url: `${SITE}/walled`, transition: 'link', seq: 3 },
+    { kind: 'nav', url: `${SITE}/challenge`, transition: 'link', seq: 4 },
+    { kind: 'nav', url: `${SITE}/members`, transition: 'link', seq: 5 },
+    { kind: 'session_stop', seq: 6 },
+  ]);
+  const walls = await fetch(`${BACKEND}/api/sessions/walls/brief`).then((r) => r.text());
+  const wallLine = (path) => walls.split('\n').find((l) => l.startsWith(`- ${SITE}${path} →`)) ?? '';
+  check('fetch check: a refusal status is called a bot wall, not missing content',
+    /→ HTTP 403 .*; refused \(bot wall or blocked\): a plain fetch does not get this page; use ctx\.browser, or record differently$/.test(wallLine('/walled')), wallLine('/walled'));
+  check('fetch check: a challenge page is called a bot wall too',
+    /→ HTTP 200 .*; refused \(bot wall or blocked\)/.test(wallLine('/challenge')), wallLine('/challenge'));
+  check('fetch check: a redirect to a sign-in page is called out of scope',
+    /\(redirected to .*\/login\?returnUrl=\/members\); redirected to a login page: this page needs a session the tool does not keep \(out of scope\)$/.test(wallLine('/members')), wallLine('/members'));
+
+  // A gated API and the automation the session already has.
+  const gatedStop = await record('gated', [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${SITE}/shop`, title: 'Shop', lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'hub', target: { tag: 'input', id: 'search', selector: '#search', aria: 'Search' }, seq: 2 },
+    { kind: 'net', method: 'GET', url: `${SITE}/api/gated?q=hub`, status: 200, contentType: 'application/json',
+      resBody: JSON.stringify({ results: [{ name: 'CalDigit Element Hub', price: 189 }, { name: 'OWC Thunderbolt Hub', price: 129 }] }), seq: 3 },
+    { kind: 'snapshot', reason: 'load', url: `${SITE}/shop`, title: 'Shop', text: textOf(FIRST), html: domOf(FIRST), seq: 4 },
+    { kind: 'session_stop', seq: 5 },
+  ]);
+  check('gated: the deterministic generator still builds a spec for it', gatedStop.spec === true);
+  const gated = await fetch(`${BACKEND}/api/sessions/gated/brief`).then((r) => r.text());
+  check('brief: the call that carried the typed value is replayed and reported as gated',
+    gated.includes(`- #3 GET ${SITE}/api/gated?q=hub replayed without cookies or credentials → HTTP 401: gated; obtain the site's anonymous bearer with ctx.site.token('${SITE}/shop') and send it as authorization`),
+    gated.match(/The calls that carried a typed value[\s\S]{0,400}/)?.[0]);
+  const existing = gated.match(/### The automation this session already has\n\n([\s\S]*?)\n\n###/)?.[1] ?? '';
+  check('brief: the automation the session already has is described, token step and probe status included',
+    existing.includes('browser-token step (direct call needs a bearer token (probe returned 401)') &&
+    existing.includes(`GET ${SITE}/api/gated?q={{`) && existing.includes('parameters search="hub"') && existing.includes('built by the deterministic generator'),
+    existing);
+  check('brief: a session with no automation says so', walls.includes('### The automation this session already has\n\nNone: the deterministic analyser refused.'),
+    walls.match(/### The automation this session already has[\s\S]{0,200}/)?.[0]);
+
+  // JSONP: the recorder kept the URL, the export fetches the body.
+  const jsonpEvents = shopEvents();
+  jsonpEvents.splice(-1, 0, { kind: 'net_meta', method: 'GET', url: `${SITE}/jsonp?callback=cb&q=hub`, status: 200, resourceType: 'script', seq: 13 });
+  jsonpEvents[jsonpEvents.length - 1].seq = 14;
+  await record('jsonp', jsonpEvents);
+  const jsonp = await fetch(`${BACKEND}/api/sessions/jsonp/brief`).then((r) => r.text());
+  check('brief: a script-tag body the recorder could not capture is fetched at export and explained',
+    jsonp.includes(`### A script-tag response the recorder could not capture, ${SITE}/jsonp?callback=cb&q=hub`) &&
+    jsonp.includes('almost certainly JSONP') && jsonp.includes('`callback=`') && jsonp.includes('cb({"q":"hub"'),
+    jsonp.match(/### A script-tag response[\s\S]{0,600}/)?.[0]);
+  const jsonpSkipped = await fetch(`${BACKEND}/api/sessions/jsonp/brief?probe=0`).then((r) => r.text());
+  check('brief: probe=0 skips the script-tag fetch like the page fetches',
+    !jsonpSkipped.includes('### A script-tag response') && jsonpSkipped.includes('Not checked (export with ?probe=0'));
+
+  // A header row marked by mistake names columns; it is not a value any row
+  // carries, and demanding it would only be satisfied by scraping the header.
+  const headerEvents = shopEvents();
+  headerEvents.splice(-1, 0,
+    { kind: 'action', action: 'mark', text: 'Title Price Link', target: { tag: 'tr', selector: '#results > thead > tr' }, seq: 13 },
+    { kind: 'action', action: 'mark', text: 'OWC Thunderbolt Hub $129', target: { tag: 'tr', selector: '#results > tbody > tr:nth-child(2)' }, seq: 14 },
+    // "thead" hides inside plenty of ids: this one is a heading, and required.
+    { kind: 'action', action: 'mark', text: 'Satechi Slim Hub', target: { tag: 'h1', selector: '#firstHeading' }, seq: 15 });
+  headerEvents[headerEvents.length - 1].seq = 16;
+  await record('header', headerEvents);
+  const headerBrief = await fetch(`${BACKEND}/api/sessions/header/brief?probe=0`).then((r) => r.text());
+  check('marks: the brief says a marked table header row is ignored, and only that one',
+    headerBrief.includes('- "OWC Thunderbolt Hub $129"') && headerBrief.includes('- "Satechi Slim Hub"\n') &&
+    headerBrief.includes('- "Title Price Link" — ignored: a table header row, not a value'),
+    headerBrief.match(/### Marked text[\s\S]{0,300}/)?.[0]);
+  const importTo = (session, text) => fetch(`${BACKEND}/api/sessions/${session}/import`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  const headerImport = await importTo('header', answer);
+  check('marks: an answer carrying the row but not the header is accepted, and the note says why',
+    headerImport.status === 200 && /all 2 marked selection\(s\) located \(the marked table header row "title price link" is ignored: a header names columns, it is not a value\)/.test(headerImport.body.note),
+    JSON.stringify(headerImport.body));
+
+  // One writer per session: an import holds it while the script runs.
+  await record('lock', shopEvents());
+  const SLOW = GOOD.replace('async function run(ctx) {', 'async function run(ctx) {\n  await ctx.sleep(1500);');
+  const slowAnswer = JSON.stringify({ title: 'Slow', summary: 'Sleeps, then reads the listing.', parameters: PARAMS, fixed: [], source: SLOW });
+  const firstImport = importTo('lock', slowAnswer);
+  await sleep(300);
+  const secondImport = await importTo('lock', slowAnswer);
+  const effortDuring = await fetch(`${BACKEND}/api/sessions/lock/effort`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const firstDone = await firstImport;
+  check('lock: a second import while one is verifying is refused',
+    secondImport.status === 409 && /already being verified/.test(secondImport.body.error ?? ''), JSON.stringify(secondImport));
+  check('lock: Maximum Effort Mode is refused while an answer is being verified', effortDuring.status === 409, String(effortDuring.status));
+  const laterImport = await importTo('lock', slowAnswer);
+  check('lock: the first import completed and a later one proceeds',
+    firstDone.status === 200 && laterImport.status === 200, `${firstDone.status} ${laterImport.status}`);
+
+  // curl, with no JSON wrapper: the body is the goal, then the answer.
+  await record('curl', shopEvents());
+  const asText = (path, body) => fetch(`${BACKEND}${path}`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body });
+  const goalRes = await asText('/api/sessions/curl/brief?probe=0', 'every hub on the final page');
+  const goalBrief = await goalRes.text();
+  check('curl: a text/plain body on the brief route is the goal',
+    goalRes.status === 200 && goalBrief.includes('## Goal\n\nevery hub on the final page') && readMeta('curl').goal === 'every hub on the final page',
+    `${goalRes.status} ${goalBrief.match(/## Goal[\s\S]{0,80}/)?.[0]}`);
+  const textImport = await asText('/api/sessions/curl/import', answer);
+  check('curl: a text/plain body on the import route is the answer',
+    textImport.status === 200 && readSpec('curl').repaired.mode === 'import', `${textImport.status} ${await textImport.text()}`.slice(0, 300));
+
+  // What the model gets back when its answer will not parse.
+  await record('parse', shopEvents());
+  const trailing = await importTo('parse', '```json\n{\n  "title": "x",\n  "parameters": [1,2,],\n  "source": "async function run(ctx) { return []; }"\n}\n```');
+  check('parse: a trailing comma is refused with the block, the position and the rule',
+    trailing.status === 422 && /^REJECTED: json block #1 does not parse: .*position \d+/.test(trailing.body.error) && /no trailing commas, no comments/.test(trailing.body.error),
+    JSON.stringify(trailing.body));
+  const commented = await importTo('parse', '```json\n{\n  // the script\n  "source": "async function run(ctx) { return []; }"\n}\n```');
+  check('parse: a comment is refused the same way',
+    commented.status === 422 && /^REJECTED: json block #1 does not parse: .*position \d+/.test(commented.body.error), JSON.stringify(commented.body));
+  const twoBlocks = await importTo('parse',
+    'The shape first:\n```json\n' + JSON.stringify({ title: 'Example', summary: 'shape only', parameters: [], fixed: [], source: 'async function run(ctx) { return [{ a: 1 }]; }' }) +
+    '\n```\nAnd the answer:\n```json\n' + JSON.stringify({ title: 'Real Answer', summary: 'Fetches the listing and returns the first three items.', parameters: PARAMS, fixed: [], source: GOOD }) + '\n```');
+  check('parse: with two json blocks the last one carrying source is used',
+    twoBlocks.status === 200 && /saved as "Real Answer"/.test(twoBlocks.body.text ?? ''), JSON.stringify(twoBlocks.body));
+  const asLines = await importTo('parse', '```json\n' + JSON.stringify({ title: 'Lines', summary: 's', parameters: PARAMS, fixed: [], source: GOOD.split('\n') }) + '\n```');
+  check('parse: a source given as an array of lines is refused with the fix named',
+    asLines.status === 422 && asLines.body.error === 'REJECTED: json block #1: "source" is an array of lines. Send the whole script as ONE JSON string, its lines joined with \\n.',
+    JSON.stringify(asLines.body));
+  const asNumber = await importTo('parse', '```json\n' + JSON.stringify({ source: 42 }) + '\n```');
+  check('parse: a source of any other type is refused too',
+    asNumber.status === 422 && /"source" is a number\. Send the whole script as ONE JSON string/.test(asNumber.body.error ?? ''), JSON.stringify(asNumber.body));
+
+  // Boundaries: every bad request is answered, none of them is a 500.
+  const badBody = await fetch(`${BACKEND}/api/sessions/parse/import`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text": ' });
+  check('boundary: malformed JSON is a 400', badBody.status === 400, String(badBody.status));
+  const unknownBrief = await fetch(`${BACKEND}/api/sessions/nope/brief`);
+  const unknownImport = await importTo('nope', 'anything');
+  check('boundary: an unknown session is a 404 on both routes', unknownBrief.status === 404 && unknownImport.status === 404, `${unknownBrief.status} ${unknownImport.status}`);
+  await api('/api/sessions', { session: 'live', hosts: ['127.0.0.1'], startedAt: Date.now() });
+  const liveBrief = await fetch(`${BACKEND}/api/sessions/live/brief`);
+  const liveImport = await importTo('live', 'anything');
+  check('boundary: a session still recording is a 409 on both routes',
+    liveBrief.status === 409 && liveImport.status === 409 && /only complete recordings/.test(liveImport.body.error ?? ''),
+    `${liveBrief.status} ${JSON.stringify(liveImport)}`);
+  const notText = await fetch(`${BACKEND}/api/sessions/parse/import`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 42 }) })
+    .then(async (r) => ({ status: r.status, body: await r.json() }));
+  check('boundary: a non-string text is a 422 keeping the {error} shape the page reads',
+    notText.status === 422 && /^REJECTED: "text" must be a string/.test(notText.body.error ?? ''), JSON.stringify(notText));
+  // Declared, not sent: the backend refuses on the length alone, which is the
+  // point — 64 MB never reaches it.
+  const huge = await new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port: BACKEND_PORT, path: '/api/sessions/parse/import', method: 'POST',
+      headers: { 'content-type': 'text/plain', 'content-length': String(65 * 1024 * 1024) } });
+    req.on('response', (res) => { res.resume(); req.destroy(); resolve(res.statusCode); });
+    req.on('error', (e) => reject(e));
+    req.write('x'.repeat(1024));
+  });
+  const health = await fetch(`${BACKEND}/health`).then((r) => r.json());
+  check('boundary: a body over the limit is a 413 and the backend still answers', huge === 413 && health.ok === true, `${huge} ${JSON.stringify(health)}`);
+
+  // The acceptance searches the pages the operator saw for the rows a script
+  // returns. Four heavy pages ahead of the one that matters fill that budget,
+  // so it is read newest first: a script showing the final page is accepted.
+  const heavy = (seq) => ({
+    kind: 'snapshot', reason: 'load', url: `${SITE}/heavy/${seq}`, title: 'Heavy',
+    text: `page ${seq} `.repeat(1) + 'x'.repeat(250_000), html: `<p>${'y'.repeat(700_000)}</p>`, seq,
+  });
+  await record('deep', [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${SITE}/heavy/1`, title: 'Heavy', lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'zzz', target: { tag: 'input', id: 'search', selector: '#search' }, seq: 2 },
+    heavy(3), heavy(4), heavy(5), heavy(6),
+    { kind: 'snapshot', reason: 'stop', url: `${SITE}/heavy/last`, title: 'Heavy', text: 'Marmalade Sky Widget\n1 result', html: '<ul><li>Marmalade Sky Widget</li></ul>', seq: 7 },
+    { kind: 'session_stop', seq: 8 },
+  ]);
+  const deep = await importTo('deep', 'async function run(ctx) { void ctx.inputs.search; return [{ title: \'Marmalade Sky Widget\' }]; }');
+  check('acceptance: the last page is searched even when earlier pages fill the evidence budget',
+    deep.status === 200 && /1 of 1 row\(s\) carry text the operator saw/.test(deep.body.text ?? ''), JSON.stringify(deep).slice(0, 300));
+
+  // The brief of a session that already has a script shows the script itself.
+  const afterImport = await fetch(`${BACKEND}/api/sessions/byom/brief?probe=0`).then((r) => r.text());
+  check('brief: a session that already has an imported script shows it in full',
+    afterImport.includes('session script (automation.mjs, hosts 127.0.0.1)') && afterImport.includes('built by external in import mode') &&
+    afterImport.includes('--- current script ---') && afterImport.includes('ctx.inputs.query'),
+    afterImport.match(/### The automation this session already has[\s\S]{0,300}/)?.[0]);
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

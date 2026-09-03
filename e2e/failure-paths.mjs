@@ -3,12 +3,15 @@
 // reason when the page, endpoint, parameter or outcome does not match.
 // Deterministic, fixture-driven, no live Sijilat. Run: node e2e/failure-paths.mjs
 import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { analyse } from '../backend/src/analyse.ts';
 import { SPEC_VERSION, toSpec } from '../backend/src/generate.ts';
 import { run } from '../runner/src/run.ts';
 import { lintScript, runScript } from '../runner/src/script.ts';
 import { sanitise } from '../backend/src/redact.ts';
+import { robotsCheck } from '../backend/src/robots.ts';
+import { parseEnv } from '../backend/src/env.ts';
 
 const MOCK_PORT = 4983; // dedicated port: never collide with an interactive mock or backend
 const MOCK = `http://127.0.0.1:${MOCK_PORT}`;
@@ -371,6 +374,67 @@ try {
     'async function run(ctx) { void ctx.inputs.q; return ctx.http.fetch("http://elsewhere.invalid/"); }', { inputs, hosts })));
   check('script step: a host outside the verified list stops the run',
     !offHost.ok && /outside the hosts this automation was verified against/.test(offHost.stoppedReason || ''), offHost.stoppedReason);
+  // --- bring your own model: robots.txt reading and the .env loader ----------
+  // robotsCheck reports what a site asks every crawler to leave alone. Each
+  // rule shape below is one a real robots.txt uses, and a file served as HTML
+  // is a site's 404 page, not a set of rules.
+  const ROBOTS_PORT = 4997; // dedicated port: no other suite uses it
+  const robotsBusy = await fetch(`http://127.0.0.1:${ROBOTS_PORT}/`).then(() => true).catch(() => false);
+  if (robotsBusy) throw new Error(`port ${ROBOTS_PORT} already in use — stop whatever is running there before the suite`);
+  const ROBOTS_TXT = [
+    '# what this file asks of crawlers',
+    'User-agent: BadBot',
+    'Disallow: /private/',
+    '',
+    'User-agent: *',
+    'Disallow: /shop',
+    'Allow: /shop/public',
+    'Disallow: /shop*sort=',
+    'Disallow: /*.json$',
+    'Disallow: /comment   # a trailing comment, not part of the path',
+    '',
+  ].join('\n');
+  // The same file on two origins: rules for 127.0.0.1, a page for localhost.
+  const robotsServer = createServer((req, res) => {
+    const asHtml = String(req.headers.host ?? '').startsWith('localhost');
+    res.writeHead(200, { 'content-type': asHtml ? 'text/html' : 'text/plain' });
+    res.end(ROBOTS_TXT);
+  });
+  await new Promise((resolve) => robotsServer.listen(ROBOTS_PORT, resolve));
+  try {
+    const R = `http://127.0.0.1:${ROBOTS_PORT}`;
+    const L = `http://localhost:${ROBOTS_PORT}`;
+    const hits = await robotsCheck([
+      `${R}/shop?sort=price`, `${R}/shop/public`, `${R}/data/x.json`, `${R}/data/x.json?v=1`,
+      `${R}/private/thing`, `${R}/comment/page`, `${R}/about`, `${L}/shop`,
+    ]);
+    const seen = JSON.stringify([...hits]);
+    check('robots: a wildcard rule matches the query it names', hits.get(`${R}/shop?sort=price`) === '/shop*sort=', seen);
+    check('robots: a longer Allow beats the Disallow above it', !hits.has(`${R}/shop/public`), seen);
+    check('robots: a $ anchor matches only at the end', hits.get(`${R}/data/x.json`) === '/*.json$' && !hits.has(`${R}/data/x.json?v=1`), seen);
+    check('robots: a group for another agent does not apply', !hits.has(`${R}/private/thing`), seen);
+    check('robots: a trailing comment is not part of the pattern', hits.get(`${R}/comment/page`) === '/comment', seen);
+    check('robots: a path no rule names is not reported', !hits.has(`${R}/about`), seen);
+    check('robots: a robots.txt served as HTML is ignored', !hits.has(`${L}/shop`), seen);
+  } finally {
+    robotsServer.close();
+  }
+
+  // The .env loader: quotes are the file's syntax, not part of the secret.
+  const env = parseEnv([
+    '# a comment',
+    '',
+    'ANTHROPIC_API_KEY="sk-quoted"',
+    "REPAIR_MODEL='claude-sonnet-5'",
+    'EFFORT_LEVEL=xhigh  ',
+    'DATABASE_URL=postgres://u:p@h/db?a=1&b=2',
+    'QUOTE_INSIDE=he said "hi"',
+    'not a key: ignored',
+  ].join('\n'));
+  check('env: matching quotes are stripped', env.ANTHROPIC_API_KEY === 'sk-quoted' && env.REPAIR_MODEL === 'claude-sonnet-5', JSON.stringify(env));
+  check('env: unquoted values, an = inside the value, comments and blanks',
+    env.EFFORT_LEVEL === 'xhigh' && env.DATABASE_URL === 'postgres://u:p@h/db?a=1&b=2' && Object.keys(env).length === 5, JSON.stringify(env));
+  check('env: a quote that is not a wrapper is kept', env.QUOTE_INSIDE === 'he said "hi"', JSON.stringify(env));
 } finally {
   mock.kill();
 }

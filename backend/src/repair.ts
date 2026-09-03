@@ -14,6 +14,7 @@ import type { RunResult } from '../../runner/src/run.js';
 import type { Bearer } from '../../runner/src/browser-token.js';
 import { SCRIPT_FILE, getMeta, getScript, getSpec, readEvents, saveMeta, saveScript, saveSpec, status } from './store.js';
 import { lintScript, runScript, type ScriptOk } from '../../runner/src/script.js';
+import { splitMarks } from './candidate.js';
 import { INVESTIGATE_TOOLS, estimateSpend, evidenceStrings, navSummary, overview, paramNames, rowText, runTool, shortMark, type Emit, type ToolCtx } from './llm-tools.js';
 
 // Refining a saved automation: what the last run returned, as the session
@@ -250,7 +251,7 @@ export async function repairSession(id: string, emit: Emit, signal: AbortSignal,
   emit('info', 'Reading the recording…');
   const events = readEvents(id);
   const a = analyse({ meta: { session: id, status: 'complete' }, events });
-  const marks = a.marks;
+  const marks = splitMarks(events, a).marks;
   const params = paramNames(a);
   const evidence = evidenceStrings(events, a);
 

@@ -13,7 +13,7 @@ import type { Spec } from './generate.js';
 import type { Bearer } from '../../runner/src/browser-token.js';
 import { getScript, getSpec, saveMeta } from './store.js';
 import type { ScriptOk } from '../../runner/src/script.js';
-import { ACCEPTANCE_RULES, checkCandidate, loadEvidence, saveCandidate, scriptContract, type Candidate } from './candidate.js';
+import { ACCEPTANCE_RULES, checkCandidate, describeExisting, loadEvidence, saveCandidate, scriptContract, type Candidate } from './candidate.js';
 import { INVESTIGATE_TOOLS, estimateSpend, navSummary, overview, runTool, type Emit, type ToolCtx, type Usage } from './llm-tools.js';
 
 export const MODEL = process.env.EFFORT_MODEL ?? 'claude-opus-5';
@@ -126,16 +126,6 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
     },
   },
 ];
-
-function describeExisting(spec: Spec, script: string | undefined): string {
-  const steps = spec.steps.map((s) => s.type === 'request'
-    ? `${s.method} ${s.url}${s.bodyTemplate !== undefined ? ` body ${JSON.stringify(s.bodyTemplate).slice(0, 300)}` : ''}`
-    : s.type === 'script' ? `session script (${s.file}, hosts ${s.hosts.join(', ')})`
-    : `${s.type} step`).join(' → ');
-  const cols = spec.outcome.columns?.map((c) => c.name).join(', ');
-  const base = `${steps}; parameters ${spec.parameters.map((p) => `${p.name}="${p.example}"`).join(', ') || 'none'}; rows at ${spec.outcome.extract.records ?? 'the whole response'}; ${cols ? `columns ${cols}` : 'no marked columns'}${spec.repaired?.summary ? `; built for: ${spec.repaired.summary}` : ''}`;
-  return script ? `${base}\n--- current script ---\n${script.slice(0, 8000)}\n--- end script ---` : base;
-}
 
 // --- the loop --------------------------------------------------------------------
 
