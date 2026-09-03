@@ -119,7 +119,16 @@ on the real site.
   `form.submit()` fires no submit event, so the form is described from its
   fields; a shadow control retargets its events to its host, so the
   composed path names the control itself. Suite only.
-- Forms with several fields: one parameter each.
+- Values chosen from a suggestion list. The list fills the box without an
+  input event, so what the operator typed is only the first few keystrokes:
+  the whole value is read from the navigation that followed. Keystroke
+  prefixes and values typed and then abandoned are ignored, and a value has
+  to be a whole query parameter or path segment of a URL to count as that
+  URL's parameter. Suite only.
+- Forms with several fields: one parameter each. Each parameter is named
+  after the field's id, or, when that id is generated ("s0-2-46-…"), after
+  the page's own label for the field ("Minimum Value in $" →
+  `minimum_value`).
 - Two-step lookups, search then detail, re-resolved per input. Live:
   wwe.com.
 - Server-rendered detail pages read by a browser step. Live: wwe.com bios.

@@ -6,7 +6,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { analyse } from '../backend/src/analyse.ts';
-import { SPEC_VERSION, toSpec } from '../backend/src/generate.ts';
+import { SPEC_VERSION, paramName, toSpec } from '../backend/src/generate.ts';
 import { run } from '../runner/src/run.ts';
 import { lintScript, runScript } from '../runner/src/script.ts';
 import { sanitise } from '../backend/src/redact.ts';
@@ -435,6 +435,76 @@ try {
   check('env: unquoted values, an = inside the value, comments and blanks',
     env.EFFORT_LEVEL === 'xhigh' && env.DATABASE_URL === 'postgres://u:p@h/db?a=1&b=2' && Object.keys(env).length === 5, JSON.stringify(env));
   check('env: a quote that is not a wrapper is kept', env.QUOTE_INSIDE === 'he said "hi"', JSON.stringify(env));
+
+  // --- chunk 2: correlation hygiene ----------------------------------------
+  // A search box filled from a suggestion list. The operator typed three
+  // prefixes, abandoned one of them, clicked the suggestion, and the site
+  // received a value none of the keystrokes equals.
+  const boxTarget = { id: 'gh-ac', selector: '#gh-ac', aria: 'Search for anything' };
+  const suggest = analyse({
+    meta: { session: 'suggest', status: 'complete' },
+    events: [
+      { kind: 'session_start', seq: 0 },
+      { kind: 'page', url: 'https://shop.test/', lang: 'en', seq: 1 },
+      { kind: 'action', action: 'input', value: 'i', target: boxTarget, seq: 2 },
+      { kind: 'action', action: 'input', value: 'thund', target: boxTarget, seq: 3 },
+      { kind: 'action', action: 'input', value: 'iphone', target: boxTarget, seq: 4 },
+      { kind: 'action', action: 'click', target: { tag: 'span', text: 'iphone 17 pro max' }, seq: 5 },
+      { kind: 'nav', url: 'https://shop.test/sch/i.html?_nkw=iphone+17+pro+max&_sacat=0', seq: 6 },
+      { kind: 'net', method: 'GET', url: 'https://shop.test/sch/ajax/multiple_images_expsvc?mode=grid', status: 200,
+        resBody: JSON.stringify({ items: [{ id: 'p1', img: 'a.jpg' }, { id: 'p2', img: 'b.jpg' }] }), seq: 7 },
+      { kind: 'net', method: 'GET', url: 'https://shop.test/api/list?_nkw=iphone%2B17%2Bpro%2Bmax&_sacat=0', status: 200,
+        resBody: JSON.stringify({ total: 1, rows: [{ id: 'p1', title: 'iPhone 17 Pro Max 256GB', price: '1099.00' }] }), seq: 8 },
+      { kind: 'session_stop', seq: 9 },
+    ],
+  });
+  check('prefixes: three keystroke values in one field leave one input',
+    suggest.inputs.length === 1, JSON.stringify(suggest.inputs));
+  check('suggestion: the input carries what the site received, and its label',
+    suggest.inputs[0]?.value === 'iphone 17 pro max' && suggest.inputs[0]?.label === 'Search for anything',
+    JSON.stringify(suggest.inputs));
+  check('suggestion: the recording says where the value came from',
+    suggest.notes.some((n) => /suggestion list, clicked in the recording/.test(n)), JSON.stringify(suggest.notes));
+  const imagesCall = suggest.calls.find((c) => /multiple_images/.test(c.url));
+  check('url: a value is never found inside a path segment',
+    imagesCall?.matches.length === 0, JSON.stringify(imagesCall?.matches));
+  const listCall = suggest.calls.find((c) => /\/api\/list/.test(c.url));
+  check('url: a whole query value the site re-encoded still matches',
+    listCall?.matches.length === 1 && listCall.matches[0].where === 'url' &&
+    listCall.matches[0].token === 'iphone%2B17%2Bpro%2Bmax', JSON.stringify(listCall?.matches));
+  check('url: the call carrying the whole value is the outcome',
+    /\/api\/list/.test(suggest.outcome?.url ?? ''), suggest.outcome?.url);
+
+  // A value too short to mean anything correlates nowhere: a typed "1" used
+  // to template /v1/search into a placeholder.
+  const short = analyse({
+    meta: { session: 'short', status: 'complete' },
+    events: [
+      { kind: 'session_start', seq: 0 },
+      { kind: 'page', url: 'https://shop.test/', lang: 'en', seq: 1 },
+      { kind: 'action', action: 'input', value: '1', target: { id: 'page_no', selector: '#page_no' }, seq: 2 },
+      { kind: 'net', method: 'GET', url: 'https://shop.test/v1/search?limit=25', status: 200,
+        resBody: JSON.stringify({ rows: [{ id: 'p1' }] }), seq: 3 },
+      { kind: 'session_stop', seq: 4 },
+    ],
+  });
+  check('url: a one-character value does not correlate to /v1/search',
+    short.calls[0].matches.length === 0 && !short.outcome, JSON.stringify(short.calls[0].matches));
+
+  // paramName: the field's own id when a person could have chosen it, else
+  // the page's label for the field, else "query".
+  const BLOB = 's0-2-46-0-9-9-0-1-1-3-0-1-2-10-textbox';
+  for (const [field, label, want] of [
+    ['gh-ac', 'Search for anything', 'gh_ac'],
+    ['cr_name_en', undefined, 'cr_name_en'],
+    [BLOB, 'Minimum Value in $', 'minimum_value'],
+    [BLOB, undefined, 'query'],
+    [BLOB, '$', 'query'],
+    ['mat-input-0', 'Registered company name in English', 'registered_company_name'],
+  ]) {
+    check(`paramName: ${field.slice(0, 12)} ${label ? `+ "${label}"` : 'with no label'} → ${want}`,
+      paramName(field, label) === want, paramName(field, label));
+  }
 } finally {
   mock.kill();
 }

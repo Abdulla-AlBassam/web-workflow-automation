@@ -143,7 +143,7 @@ export function paramNames(a: Analysis): { name: string; value: string; field: s
   const used = new Set<string>();
   for (const i of a.inputs) {
     if (out.some((o) => o.value === i.value)) continue;
-    const base = paramName(i.field);
+    const base = paramName(i.field, i.label);
     let name = base;
     for (let n = 2; used.has(name); n++) name = `${base}_${n}`;
     used.add(name);

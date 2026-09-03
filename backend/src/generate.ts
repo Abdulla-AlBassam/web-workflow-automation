@@ -3,7 +3,7 @@ import { requestHeaders } from './probe.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 16;
+export const SPEC_VERSION = 17;
 
 export type Spec = {
   version: number;
@@ -101,18 +101,34 @@ function embedTemplatise(body: unknown, embeds: { token: string; name: string; v
   return walk(body);
 }
 
+// Words a name does not need. The label is read for the words it carries,
+// so its punctuation ("Minimum Value in $") never reaches the name.
+const LABEL_STOP = new Set(['the', 'a', 'an', 'of', 'for', 'in', 'to', 'and']);
+
+function labelSlug(label: string): string | undefined {
+  const words = label.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w && !LABEL_STOP.has(w));
+  let slug = '';
+  for (const w of words.slice(0, 3)) {
+    const next = slug ? `${slug}_${w}` : w;
+    if (next.length > 30) break;
+    slug = next;
+  }
+  return /^[a-z]/.test(slug) && slug.length >= 3 ? slug : undefined;
+}
+
 // The parameter takes the field's own id when that id reads like a name a
 // person chose (letters first, three characters or more, no generated
 // numeric suffix such as "input-3" or "mat-input-0", at most one digit run
 // so eBay-style generated ids like "s0-2-46-0-9-…-textbox" never surface as
-// names, not a generic word). Anything else becomes "query". Shared with the
-// repair loop so a script and a deterministic spec name the same parameter
-// for the same field.
-export function paramName(field: string): string {
+// names, not a generic word). Failing that, the page's own label for the
+// field, which is what the operator read; failing that, "query". Shared with
+// the repair loop so a script and a deterministic spec name the same
+// parameter for the same field.
+export function paramName(field: string, label?: string): string {
   const id = field.replace(/[^\w]/g, '_');
   const chosen = /^[A-Za-z]/.test(id) && id.length >= 3 && !/[_-]?\d+$/.test(id)
     && (id.match(/\d+/g) ?? []).length < 2 && !/^(field|input|text|textbox|value)$/i.test(id);
-  return chosen ? id : 'query';
+  return chosen ? id : (label && labelSlug(label)) || 'query';
 }
 
 // One parameter per distinct typed value found in the outcome call. A value
@@ -128,7 +144,7 @@ function paramGroups(matches: Match[]): ParamGroup[] {
   }
   const used = new Set<string>();
   for (const g of groups) {
-    const base = paramName(g.matches[0].input.field);
+    const base = paramName(g.matches[0].input.field, g.matches[0].input.label);
     let name = base;
     for (let i = 2; used.has(name); i++) name = `${base}_${i}`;
     used.add(name);

@@ -9,7 +9,8 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
   "origin": "https://www.sijilat.bh",
   "language": "EN",                     // recorded UI language; the runner sets it explicitly
   "parameters": [
-    // One per distinct typed value found in the outcome call.
+    // One per distinct typed value found in the outcome call. Named after the
+    // field's id, else the page's own label for the field, else "query".
     { "name": "query", "example": "bank", "required": true }
   ],
   "steps": [

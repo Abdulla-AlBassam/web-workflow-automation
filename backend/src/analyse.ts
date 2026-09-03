@@ -4,7 +4,9 @@
 
 export type Trace = { meta: { session: string; status: string }; events: Record<string, unknown>[] };
 
-export type Input = { field: string; value: string; selector?: string };
+// label is the page's own name for the field (aria-label, else placeholder):
+// the only readable name a field whose id is a generated blob has.
+export type Input = { field: string; value: string; selector?: string; label?: string };
 
 // token is the exact substring that matched (URL and embedded matches may be
 // encoded), so spec generation can splice a placeholder in its place.
@@ -99,6 +101,40 @@ export function embeddedTokenRegex(token: string): RegExp {
   return new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, 'g');
 }
 
+// A value this short is found somewhere by accident. A typed "i" once matched
+// eBay's /sch/ajax/multiple_images_expsvc and templated the endpoint itself
+// into a placeholder; a typed "1" would do the same to /v1/search.
+const MIN_CORRELATION = 3;
+
+// Every form a URL might carry a typed value in: raw, percent-encoded,
+// plus-encoded, and each of those encoded once more — a page that re-issues
+// its own search URL inside an XHR sends "iphone 17 pro max" as
+// iphone%2B17%2Bpro%2Bmax or iphone%252017%2520pro%2520max.
+function urlForms(value: string): Set<string> {
+  const forms = [value, encodeURIComponent(value), value.replace(/ /g, '+')];
+  // Chromium's URL serialiser also percent-encodes apostrophes in query
+  // strings (the "special-query" set), which encodeURIComponent does not.
+  for (const f of [...forms]) if (f.includes("'")) forms.push(f.replace(/'/g, '%27'));
+  return new Set([...forms, ...forms.map((f) => encodeURIComponent(f))]);
+}
+
+// Where a typed value sits in a URL, if it sits there at all: it must be a
+// whole query-parameter value or a whole path segment, never a substring of
+// one. The token returned is the raw URL text, which is what spec generation
+// splices the placeholder over.
+function urlToken(url: string, value: string): string | undefined {
+  if (value.length < MIN_CORRELATION) return undefined;
+  let u: URL;
+  try { u = new URL(url); } catch { return undefined; }
+  const forms = urlForms(value);
+  for (const pair of u.search.slice(1).split('&')) {
+    const eq = pair.indexOf('=');
+    if (eq >= 0 && forms.has(pair.slice(eq + 1))) return pair.slice(eq + 1);
+  }
+  for (const seg of u.pathname.split('/')) if (seg && forms.has(seg)) return seg;
+  return undefined;
+}
+
 function findMatches(reqBody: string | undefined, url: string, inputs: Input[]): Match[] {
   const matches: Match[] = [];
   const parsed = parseBody(reqBody);
@@ -112,22 +148,14 @@ function findMatches(reqBody: string | undefined, url: string, inputs: Input[]):
   }
   // GET-style workflows carry the value in the URL instead, usually encoded.
   for (const input of inputs) {
-    const forms = [input.value, encodeURIComponent(input.value), input.value.replace(/ /g, '+')];
-    // Chromium's URL serialiser also percent-encodes apostrophes in query
-    // strings (the "special-query" set), which encodeURIComponent does not.
-    for (const f of [...forms]) if (f.includes("'")) forms.push(f.replace(/'/g, '%27'));
-    for (const token of new Set(forms)) {
-      if (url.includes(token)) {
-        matches.push({ path: 'url', value: input.value, input, where: 'url', token });
-        break;
-      }
-    }
+    const token = urlToken(url, input.value);
+    if (token !== undefined) matches.push({ path: 'url', value: input.value, input, where: 'url', token });
   }
   // Fallback: the value bundled inside a composite string field. Exact
   // evidence wins — this runs only for inputs the call carried nowhere else.
   if (parsed !== undefined) {
     for (const input of inputs) {
-      if (!input.value || matches.some((m) => m.input.value === input.value)) continue;
+      if (input.value.length < MIN_CORRELATION || matches.some((m) => m.input.value === input.value)) continue;
       for (const token of new Set([input.value, encodeURIComponent(input.value), input.value.replace(/ /g, '+')])) {
         let found = false;
         for (const { path, value } of leaves(parsed)) {
@@ -331,15 +359,77 @@ function isStructured(resBody: string | undefined): boolean {
   return parsed !== undefined && parsed !== null && typeof parsed === 'object';
 }
 
+type Typed = Input & { seq: number };
+
+// The operator's real inputs, out of a stream of keystrokes. The recorder
+// emits a value whenever typing pauses, so one field arrives carrying its own
+// prefixes ("i", "thund", "iphone") and anything typed and then thought
+// better of. Per field, only the last value before each navigation or submit
+// survives — that is the value the search ran on — and of those, one that a
+// later value extends goes too.
+function operatorInputs(typed: Typed[], breaks: number[]): Typed[] {
+  const fieldOf = (t: Typed) => t.selector ?? t.field;
+  const last = new Map<string, Typed>();
+  for (const t of typed) {
+    const upTo = breaks.findIndex((b) => b > t.seq); // -1: after the last break
+    last.set(`${upTo}:${fieldOf(t)}`, t);
+  }
+  const kept = [...last.values()].sort((a, b) => a.seq - b.seq);
+  return kept.filter((t) => !kept.some((o) =>
+    o.seq > t.seq && fieldOf(o) === fieldOf(t) && o.value.length > t.value.length &&
+    o.value.toLowerCase().startsWith(t.value.toLowerCase())));
+}
+
+// A value chosen from a suggestion list never reaches an input event: the
+// list fills the box without one, so the recording holds the operator's few
+// keystrokes and nothing else. What the site received is in the URL it loaded
+// next, so a typed value that merely starts one of that URL's parameters is
+// replaced by the whole parameter.
+function siteValue(t: Typed, events: Record<string, unknown>[]): string | undefined {
+  const after = events.filter((e) => typeof e.seq === 'number' && (e.seq as number) > t.seq);
+  const nav = after.find((e) => e.kind === 'nav' && typeof e.url === 'string')?.url as string | undefined;
+  const submit = after.find((e) => e.kind === 'action' && e.action === 'submit' &&
+    typeof (e.form as Record<string, unknown> | undefined)?.action === 'string');
+  const action = (submit?.form as Record<string, unknown> | undefined)?.action as string | undefined;
+  for (const url of [nav, action]) {
+    if (!url) continue;
+    let u: URL;
+    try { u = new URL(url); } catch { continue; }
+    for (const v of u.searchParams.values()) {
+      if (v.length > t.value.length && v.toLowerCase().startsWith(t.value.toLowerCase())) return v;
+    }
+  }
+  return undefined;
+}
+
 export function analyse(trace: Trace): Analysis {
   const notes: string[] = [];
   const events = trace.events;
 
   const language = (events.find((e) => e.kind === 'page')?.lang as string)?.slice(0, 2).toUpperCase() || 'EN';
 
-  const inputs: Input[] = events
+  const typed: Typed[] = events
     .filter((e) => e.kind === 'action' && e.action === 'input' && typeof e.value === 'string' && e.value && e.value !== '[REDACTED]')
-    .map((e) => ({ field: (e.target as any)?.id ?? (e.target as any)?.name ?? 'field', value: e.value as string, selector: (e.target as any)?.selector }));
+    .map((e) => {
+      const t = (e.target ?? {}) as Record<string, string | undefined>;
+      const label = t.aria ?? t.placeholder;
+      return {
+        field: t.id ?? t.name ?? 'field', value: e.value as string, selector: t.selector,
+        seq: (e.seq as number) ?? 0, ...(label ? { label } : {}),
+      };
+    });
+  const breaks = events
+    .filter((e) => (e.kind === 'nav' || (e.kind === 'action' && e.action === 'submit')) && typeof e.seq === 'number')
+    .map((e) => e.seq as number);
+  const inputs: Input[] = operatorInputs(typed, breaks).map((t) => {
+    const { seq, ...input } = t;
+    const sent = siteValue(t, events);
+    if (!sent) return input;
+    const clicked = events.some((e) => e.kind === 'action' && e.action === 'click' &&
+      norm(((e.target as Record<string, unknown> | undefined)?.text as string) ?? '') === norm(sent));
+    notes.push(`"${input.value}" was typed into ${input.field} but the site received "${sent}" — a value chosen from a suggestion list${clicked ? ', clicked in the recording' : ''}; the automation parameterises what the site received`);
+    return { ...input, value: sent };
+  });
 
   const marks = [...new Set(events
     .filter((e) => e.kind === 'action' && e.action === 'mark' && typeof e.text === 'string' && (e.text as string).trim())

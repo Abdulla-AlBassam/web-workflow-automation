@@ -841,6 +841,25 @@ try {
   check('the export pill says the calls are replayed uncredentialed and a header row is ignored',
     pillPage.includes('It replays the calls that carried what you typed, without credentials, so the model is told which of them are gated, and a table header row marked by mistake is listed as ignored.'),
     pillPage.match(/<p>The export also fetches[\s\S]{0,600}?<\/p>/)?.[0] ?? 'the About the export pill is not on the page');
+
+  // --- chunk 2: correlation hygiene ----------------------------------------
+  // The same recording with the operator's keystrokes left in and the filter
+  // box given the generated id a framework would give it: the brief must name
+  // the value the search ran on, once, and the filter by its own label.
+  const prefixEvents = shopEvents();
+  prefixEvents.splice(prefixEvents.findIndex((e) => e.value === 'hub'), 0,
+    { kind: 'action', action: 'input', value: 'hu', target: { tag: 'input', id: 'search', selector: '#search', aria: 'Search' } });
+  const minAt = prefixEvents.findIndex((e) => e.value === '50');
+  prefixEvents[minAt].target = { tag: 'input', id: 'p-0-1-2[0]-9-textbox', selector: '#p-0-1-2[0]-9-textbox', aria: 'Minimum price' };
+  prefixEvents.forEach((e, i) => { e.seq = i; });
+  await record('prefix', prefixEvents);
+  const prefixBrief = await fetch(`${BACKEND}/api/sessions/prefix/brief?probe=0`).then((r) => r.text());
+  const typedBlock = prefixBrief.match(/### Values the operator typed[\s\S]*?\n\n### /)?.[0] ?? '';
+  check('brief: a keystroke prefix is not a parameter and the value is listed once',
+    !/"hu" into/.test(typedBlock) && (typedBlock.match(/"hub" into/g) ?? []).length === 1, typedBlock);
+  check('brief: a generated id is named by the field’s label',
+    /"50" into p-0-1-2\[0\]-9-textbox \(label "Minimum price"\) → suggested parameter name `minimum_price`/.test(typedBlock),
+    typedBlock);
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

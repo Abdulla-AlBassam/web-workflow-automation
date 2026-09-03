@@ -71,13 +71,12 @@ class Doc {
 
 const fence = (s: string, cut = '') => `${F}\n${s}${cut}\n${F}`;
 
-// The page's own label for the field a value was typed into.
-function labelFor(events: Ev[], field: string, value: string): string {
-  const e = events.find((x) => x.kind === 'action' && x.action === 'input' && x.value === value);
-  const t = e?.target as { aria?: string; placeholder?: string; name?: string; id?: string } | undefined;
-  const label = t?.aria ?? t?.placeholder;
+// The page's own label for the field a value was typed into, as the analyser
+// read it off the input event.
+const fieldWithLabel = (inputs: Evidence['a']['inputs'], field: string, value: string) => {
+  const label = inputs.find((i) => i.field === field && i.value === value)?.label;
   return label && label !== field ? `${field} (label "${label}")` : field;
-}
+};
 
 function hasRecords(v: unknown, depth = 0): boolean {
   if (depth > 3 || !v || typeof v !== 'object') return false;
@@ -289,7 +288,7 @@ ${navSummary(ev.events)}
 
 ### Values the operator typed (default parameters)
 
-${ev.typed.map((p) => `- "${p.value}" into ${labelFor(ev.events, p.field, p.value)} → suggested parameter name \`${p.name}\``).join('\n') || 'none'}
+${ev.typed.map((p) => `- "${p.value}" into ${fieldWithLabel(ev.a.inputs, p.field, p.value)} → suggested parameter name \`${p.name}\``).join('\n') || 'none'}
 
 ### Marked text (each must appear as a field value in the rows)
 

@@ -284,6 +284,37 @@ try {
   check('scripted submit: the POST navigation is in the evidence beside it',
     scEvents.some((e) => e.kind === 'net_meta' && e.method === 'POST' && /\/scripted\/results$/.test(e.url)),
     JSON.stringify(scEvents.filter((e) => e.kind === 'net_meta').map((e) => [e.method, e.url])));
+
+  // --- chunk 2: correlation hygiene ---------------------------------------
+
+  // 12. Autosuggest: the operator types a prefix, the suggestion list fills
+  // the box with no input event, and the filter box beside it has only its
+  // label to name it by. The spec must parameterise the value the site
+  // received, under the names the operator read.
+  await record('/autosuggest/', 'mx-suggest', async (p) => {
+    await p.fill('[aria-label="Company name"]', 'gulf');
+    await p.waitForTimeout(400); // the recorder batches every 250ms; keep the order honest
+    await p.click('#as_pick');
+    await p.fill('[aria-label="Minimum Value in $"]', '200');
+    await p.waitForTimeout(400);
+    await p.click('#as_go');
+    await p.waitForSelector('#results tbody tr');
+  });
+  const sgEvents = (await api('/api/sessions/mx-suggest/export')).events;
+  check('autosuggest: the suggestion click records no typed value',
+    !sgEvents.some((e) => e.kind === 'action' && e.action === 'input' && e.value === 'Gulf Gum Trading'),
+    JSON.stringify(sgEvents.filter((e) => e.action === 'input').map((e) => e.value)));
+  const sgSpec = await api('/api/sessions/mx-suggest/spec', {});
+  check('autosuggest: both parameters are named from the fields’ labels',
+    JSON.stringify(sgSpec.parameters?.map((x) => x.name)) === '["company_name","minimum_value"]',
+    JSON.stringify(sgSpec.parameters));
+  check('autosuggest: the example is what the site received, not the prefix',
+    sgSpec.parameters?.[0]?.example === 'Gulf Gum Trading' && sgSpec.parameters?.[1]?.example === '200',
+    JSON.stringify(sgSpec.parameters?.map((x) => x.example)));
+  const sgRun = await api('/api/sessions/mx-suggest/run', { params: { company_name: 'Gulf Gum', minimum_value: '100' } });
+  check('autosuggest: replay with a new value and a lower bound returns rows',
+    sgRun.ok && sgRun.extracted?.records?.count === 2,
+    sgRun.stoppedReason ?? JSON.stringify(sgRun.extracted?.records));
 } catch (err) {
   check('harness ran to completion', false, String(err?.stack ?? err).slice(0, 400));
 } finally {

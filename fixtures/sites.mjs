@@ -1,4 +1,4 @@
-// Scenario-matrix fixture: one server, eleven mini-sites, each mimicking a
+// Scenario-matrix fixture: one server, twelve mini-sites, each mimicking a
 // distinct real-world site shape the analyser must handle (or refuse). Used by
 // e2e/matrix.e2e.mjs; never exposed beyond localhost.
 import { createServer } from 'node:http';
@@ -14,6 +14,14 @@ const ROWS = [
   ...Array.from({ length: 7 }, (_, i) => ({
     id: `g${i + 1}`, name: `Gum Traders ${i + 1}`, city: 'Sitra', active: true, tags: [], notes: null,
   })),
+];
+
+// Priced rows for the autosuggest site, where a numeric filter has to mean
+// something: the recorded bound keeps one row, a lower bound keeps two.
+const PRICED = [
+  { id: 'p1', name: 'Gulf Gum Trading', price: 250 },
+  { id: 'p2', name: 'Gulf Gum Wholesale', price: 120 },
+  { id: 'p3', name: 'Smith + Jones Ltd', price: 900 },
 ];
 
 const FAKE_JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJhbm9uIjp0cnVlLCJzY29wZSI6InB1YmxpYyJ9.c2lnbmF0dXJl';
@@ -251,6 +259,38 @@ document.getElementById('go').addEventListener('click', () => document.getElemen
     return res.end(page('Results', `<table><tbody>${
       rows.map((r) => `<tr><td>${r.id}</td><td>${r.name}</td></tr>`).join('')
     }</tbody></table>`));
+  }
+
+  // 12. Autosuggest: the suggestion list fills the search box by assignment
+  // and dispatches nothing, so no input event ever carries the value the site
+  // is given — only the operator's first few keystrokes. The filter box
+  // beside it has a generated id and nothing but its label to name it by.
+  if (p === '/autosuggest/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('Suggested Search', `
+<input id="s0-1-2-3[0]-4-textbox" aria-label="Company name">
+<button id="as_pick">Gulf Gum Trading</button>
+<input id="s0-1-2-9[0]-7-textbox" aria-label="Minimum Value in $">
+<button id="as_go">Search</button>
+<table id="results"><tbody></tbody></table>
+<script>
+const box = document.querySelector('[aria-label="Company name"]');
+const min = document.querySelector('[aria-label="Minimum Value in $"]');
+document.getElementById('as_pick').addEventListener('click', (e) => { box.value = e.target.textContent; });
+document.getElementById('as_go').addEventListener('click', async () => {
+  const qs = 'name=' + encodeURIComponent(box.value) + '&min=' + encodeURIComponent(min.value);
+  history.pushState({}, '', '/autosuggest/?' + qs);
+  const r = await fetch('/autosuggest/api?' + qs);
+  document.querySelector('#results tbody').innerHTML =
+    (await r.json()).rows.map((x) => '<tr><td>' + x.id + '</td><td>' + x.name + '</td><td>' + x.price + '</td></tr>').join('');
+});
+</script>`));
+  }
+  if (p === '/autosuggest/api') {
+    const name = (url.searchParams.get('name') ?? '').toLowerCase();
+    const min = Number(url.searchParams.get('min') ?? 0);
+    const rows = PRICED.filter((r) => name && r.name.toLowerCase().includes(name) && r.price >= min);
+    return json(res, { total: rows.length, rows });
   }
 
   res.writeHead(404).end();
