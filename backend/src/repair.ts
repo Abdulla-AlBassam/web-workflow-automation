@@ -50,7 +50,7 @@ TOOLS
 Do not repeat a call you have already made with the same arguments; the answer will not change. If the browser route is not producing results after two tries, step back: look for the API in the recording and use it directly.
 
 THE SCRIPT
-Plain JavaScript (no import, require, process, eval). Define:
+Plain JavaScript, no import or require. The context has JavaScript's own intrinsics plus URL and URLSearchParams and nothing else: no timers, no fetch, no TextEncoder, no structuredClone. process, globalThis, eval, Function(), Reflect, Proxy, constructor, prototype and __proto__ are refused in code (an expression you pass to page.eval is not code here, so it may use them). Define:
   async function run(ctx) { ... return rows; }
 ctx.inputs   — the run's parameters, e.g. ctx.inputs.query (names given below). Read every parameter from here; never hard-code the recorded value.
 ctx.http.fetch(url, { method, headers, body }) → { status, ok, url, contentType, text, json() }. body may be an object (sent as JSON) or a string. Cookie/authorization headers are dropped.

@@ -251,10 +251,16 @@ in `.env` is needed for Adjust only.
 
 - Cookies, auth headers and password values are never stored. Redaction is
   two-layer and asserted by the e2e suite.
-- Session scripts are isolated against accidents, not hardened against a
-  hostile author: the code comes from the assistant under the tool's
-  instructions, is shown in full, and is saved only after it reproduced the
-  recording.
+- A session script sees JavaScript's own intrinsics and the four capabilities
+  it is given. Both ctx and everything it returns are built inside the
+  script's own context, over a bridge that carries only strings, so no object
+  of this process is reachable from it. A lint refuses the shapes a script has
+  no honest use for, and it runs in a worker thread the runner terminates on
+  the deadline, so one that loops forever is cut rather than taking the
+  backend with it. That is containment, not a boundary against a determined
+  hostile author: the worker shares this process, and an escape from Node's vm
+  would reach it. Which is why the script is shown in full, saved only after
+  it reproduced the recording, and comes from a model the operator chose.
 - Every run is started by a person. Stopping a recording sends one
   request on its own: the recorded outcome call, replayed with the page's
   own headers but without credentials, so the generator learns whether a

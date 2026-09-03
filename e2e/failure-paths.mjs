@@ -2,12 +2,12 @@
 // interrupted recordings are not automatable, and a replay stops with a named
 // reason when the page, endpoint, parameter or outcome does not match.
 // Deterministic, fixture-driven, no live Sijilat. Run: node e2e/failure-paths.mjs
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { analyse } from '../backend/src/analyse.ts';
-import { toSpec } from '../backend/src/generate.ts';
+import { SPEC_VERSION, toSpec } from '../backend/src/generate.ts';
 import { run } from '../runner/src/run.ts';
-import { lintScript } from '../runner/src/script.ts';
+import { lintScript, runScript } from '../runner/src/script.ts';
 import { sanitise } from '../backend/src/redact.ts';
 
 const MOCK_PORT = 4983; // dedicated port: never collide with an interactive mock or backend
@@ -154,9 +154,9 @@ try {
   check('a response that ends early stops the run with a named reason',
     !cut.ok && /ended early/.test(cut.stoppedReason || ''), cut.stoppedReason);
 
-  const scriptSpec = structuredClone(spec);
-  scriptSpec.steps = [{ id: 'automation', type: 'script', file: 'automation.mjs', reason: 'test', hosts: [] }];
-  const scriptThrows = await run(scriptSpec, { [pname]: '84121' }, {
+  const throwerSpec = structuredClone(spec);
+  throwerSpec.steps = [{ id: 'automation', type: 'script', file: 'automation.mjs', reason: 'test', hosts: [] }];
+  const scriptThrows = await run(throwerSpec, { [pname]: '84121' }, {
     readToken: noToken,
     runScript: async () => { throw new Error('ENOENT: no such file or directory\nmore lines'); },
   });
@@ -189,6 +189,188 @@ try {
     submitted('garbage') === 'garbage' && submitted({ method: 'POST' }).fields === undefined &&
     submitted({ fields: 'nope' }).fields === 'nope' && submitted(null) === null,
     JSON.stringify([submitted('garbage'), submitted({ method: 'POST' }), submitted({ fields: 'nope' })]));
+  // === 10. The session-script sandbox =======================================
+  // A script now arrives from outside (a model the operator chose, pasted
+  // back), so these prove the boundary rather than the good intentions: the
+  // context is built inside itself over a bridge that passes only strings, so
+  // no value the script can name leads back to this process; and it runs in a
+  // worker thread, so even a script that never yields is cut at the deadline
+  // and takes nothing with it.
+
+  // 10a. Nothing reachable from the script leads to this process. The crawl
+  // walks every own property and prototype of everything it can name and asks
+  // each value for a Function constructor that can see `process`.
+  const CRAWL = `async function run(ctx) {
+    void ctx.inputs.q;
+    const res = await ctx.http.fetch('${MOCK}/api/urlsearch?q=trading');
+    let caught; try { await ctx.http.fetch('ftp://elsewhere/'); } catch (e) { caught = e; }
+    const seen = new Set();
+    const hits = [];
+    const queue = [[globalThis, 'globalThis'], [ctx, 'ctx'], [res, 'response'], [caught, 'error'],
+      [ctx.sleep(0), 'promise'], [(function () { return this; })(), 'this'], [run, 'run']];
+    const reaches = (v) => {
+      for (const c of [v && v.constructor, Object.getPrototypeOf(v)]) {
+        try {
+          if (typeof c !== 'function' || typeof c.constructor !== 'function') continue;
+          const g = c.constructor('return this')();
+          if (g && (g.process || g.require || g.Buffer)) return true;
+        } catch (e) { /* refused, which is the point */ }
+      }
+      return false;
+    };
+    let n = 0;
+    while (queue.length && n++ < 60000) {
+      const [v, path] = queue.shift();
+      if (v === null || (typeof v !== 'object' && typeof v !== 'function') || seen.has(v)) continue;
+      seen.add(v);
+      if (reaches(v)) { hits.push(path); continue; }
+      if (path.split('.').length > 7) continue;
+      let names;
+      try { names = Object.getOwnPropertyNames(v); } catch (e) { continue; }
+      for (const k of names) {
+        let d;
+        try { d = Object.getOwnPropertyDescriptor(v, k); } catch (e) { continue; }
+        if (!d) continue;
+        if ('value' in d) queue.push([d.value, path + '.' + k]);
+        if (d.get) queue.push([d.get, path + '.get ' + k]);
+      }
+      try { const p = Object.getPrototypeOf(v); if (p) queue.push([p, path + '.proto']); } catch (e) {}
+    }
+    return [{ visited: seen.size, hits: hits.join(', ') }];
+  }`;
+  const crawl = await runScript(CRAWL, { inputs: { q: 'trading' }, timeoutMs: 30_000 });
+  check('sandbox: no value the script can reach leads back to this process',
+    crawl.rows?.[0].hits === '' && crawl.rows[0].visited > 500, JSON.stringify(crawl.rows?.[0] ?? crawl.error));
+
+  // 10b. The same, named path by path: each of these used to be a host object.
+  const REACH = `async function run(ctx) {
+    const out = (v) => { try { return typeof v.constructor.constructor('return this')().process; } catch (e) { return 'threw'; } };
+    const res = await ctx.http.fetch('${MOCK}/api/urlsearch?q=' + ctx.inputs.q);
+    let caught; try { await ctx.http.fetch('ftp://elsewhere/'); } catch (e) { caught = e; }
+    const slept = ctx.sleep(0); await slept;
+    const page = await ctx.dom('<b>hi</b>');
+    const rows = await page.eval("[...document.querySelectorAll('b')].map(b => ({ t: b.textContent }))");
+    await page.close();
+    return [{ json: out(JSON), log: out(ctx.log), response: out(res), error: out(caught),
+      promise: out(slept), inputs: out(ctx.inputs), page: out(page), evaluated: out(rows), q: ctx.inputs.q }];
+  }`;
+  const reach = await runScript(REACH, { inputs: { q: 'trading' }, timeoutMs: 60_000 });
+  const reached = Object.entries(reach.rows?.[0] ?? {}).filter(([k, v]) => k !== 'q' && v !== 'undefined');
+  check('sandbox: process is undefined through JSON, ctx.log, a response, a caught error, a promise, inputs, a page and its eval',
+    reach.rows?.length === 1 && reached.length === 0, JSON.stringify(reached.length ? reached : reach.error));
+
+  // 10c. A synchronous loop is cut. The vm timeout covers compilation only and
+  // a timer cannot fire while the thread spins, so this is what the worker is for.
+  const spun = Date.now();
+  const spin = await runScript('async function run(ctx) { void ctx.inputs.q; for (;;) {} }', { inputs: { q: 'trading' }, timeoutMs: 1500 });
+  const spinMs = Date.now() - spun;
+  check('sandbox: a script that loops forever is cut at the deadline',
+    spin.error === 'the script exceeded 1.5s' && spinMs < 4000, `${spin.error} after ${spinMs}ms`);
+
+  // 10d. And one that simply never resolves.
+  const stalled = await runScript('async function run(ctx) { void ctx.inputs.q; await new Promise(() => {}); }', { inputs: { q: 'trading' }, timeoutMs: 1200 });
+  check('sandbox: a script that never resolves is cut too', stalled.error === 'the script exceeded 1.2s', stalled.error);
+
+  // 10e. A browser the cut script opened is closed with it: the runner owns
+  // the browser, so terminating the script's thread cannot orphan one.
+  const chromiums = () => execFileSync('ps', ['-A', '-o', 'pid=,ppid=,comm=']).toString().split('\n')
+    .map((l) => l.trim().split(/\s+/))
+    .filter((p) => Number(p[1]) === process.pid && /chrom/i.test(p.slice(2).join(' ')))
+    .map((p) => Number(p[0]));
+  const launched = new Set();
+  const watch = setInterval(() => chromiums().forEach((pid) => launched.add(pid)), 300);
+  const hung = await runScript(`async function run(ctx) {
+    void ctx.inputs.q;
+    const page = await ctx.browser.open('${MOCK}/');
+    await page.text('body');
+    await new Promise(() => {});
+  }`, { inputs: { q: 'trading' }, timeoutMs: 6000 });
+  clearInterval(watch);
+  for (let i = 0; i < 40 && chromiums().length; i++) await new Promise((r) => setTimeout(r, 250));
+  check('sandbox: a browser opened by a script that then hangs is disposed with it',
+    hung.error === 'the script exceeded 6s' && launched.size > 0 && chromiums().length === 0,
+    `${hung.error}; launched ${[...launched]}, still running ${chromiums()}`);
+
+  // 10f. The bearer route is a contacted host like any other.
+  const tokenRun = await runScript(`async function run(ctx) {
+    const bearer = await ctx.site.token('${MOCK}/');
+    return [{ q: ctx.inputs.q, length: bearer.length }];
+  }`, { inputs: { q: 'trading' }, readToken: async () => ({ bearer: 'stub-bearer-value-long-enough', source: 'localStorage.auth' }) });
+  check('sandbox: ctx.site.token records the page it loaded as a contacted host and URL',
+    tokenRun.rows?.[0].length === 29 && tokenRun.hosts.includes('127.0.0.1') && tokenRun.urls.includes(`${MOCK}/`),
+    JSON.stringify(tokenRun));
+
+  // 10g. The URL list backs the robots.txt report, so it is bounded.
+  const many = await runScript(`async function run(ctx) {
+    void ctx.inputs.q;
+    for (let i = 0; i < 250; i++) await ctx.http.fetch('${MOCK}/api/urlsearch?i=' + i);
+    return [{ done: true }];
+  }`, { inputs: { q: 'trading' }, timeoutMs: 60_000 });
+  check('sandbox: the contacted-URL list stops at 200', many.urls?.length === 200, String(many.urls?.length ?? many.error));
+
+  // 10h. What a script can legitimately need beyond the bare intrinsics is
+  // rebuilt inside the context, and it behaves.
+  const built = await runScript(`const TOP = new URL('${MOCK}/a/b/c').origin;
+  async function run(ctx) {
+    const u = new URL('${MOCK}/api/urlsearch?a=1#f');
+    u.searchParams.set('q', ctx.inputs.q);
+    return [{ href: u.href, origin: u.origin, path: u.pathname, top: TOP,
+      relative: new URL('../x/y', '${MOCK}/a/b/c').href,
+      encoded: new URLSearchParams({ name: 'a b', mark: '&' }).toString() }];
+  }`, { inputs: { q: 'a b&c' } });
+  check('sandbox: URL and URLSearchParams are rebuilt in the context and parse as the host does',
+    built.rows?.[0].href === `${MOCK}/api/urlsearch?a=1&q=a+b%26c#f` && built.rows[0].relative === `${MOCK}/a/x/y`
+    && built.rows[0].encoded === 'name=a+b&mark=%26' && built.rows[0].top === MOCK, JSON.stringify(built.rows?.[0] ?? built.error));
+
+  // 10i. The lint is belt and braces over that boundary: the shapes a session
+  // script has no honest use for, read from code with strings and comments
+  // blanked, so an expression a page evaluates still passes.
+  const lint = (src) => lintScript(src, { q: 'trading' }).join(' ');
+  for (const [what, body] of [
+    ['constructor', 'return [{}].constructor;'],
+    ['prototype', 'return Array.prototype.slice.call([]);'],
+    ['__proto__', 'return ({}).__proto__;'],
+    ['Function(', 'return new Function("return 1")();'],
+    ['Reflect', 'return Reflect.get({}, "a");'],
+    ['Proxy', 'return new Proxy({}, {});'],
+  ]) {
+    check(`lint: ${what} in code is refused`, /must not reference/.test(lint(`async function run(ctx) { void ctx.inputs.q; ${body} }`)), lint(`async function run(ctx) { void ctx.inputs.q; ${body} }`));
+  }
+  check('lint: a dynamic import is refused', /must not import/.test(lint('async function run(ctx) { void ctx.inputs.q; return import("node:fs"); }')));
+  const evaluated = `async function run(ctx) {
+    // the page evaluates prototype tricks, not this script: Reflect, Proxy
+    const page = await ctx.dom('<a href="/x">x</a>');
+    return page.eval("Array.prototype.slice.call(document.querySelectorAll('a')).map(a => ({ href: a.constructor.name, q: '" + ctx.inputs.q + "' }))");
+  }`;
+  check('lint: the same words inside a string or a comment are not refused', lint(evaluated) === '', lint(evaluated));
+
+  // 10j. Every way a script step can fail is a named stop, never a throw.
+  const scriptSpec = {
+    version: SPEC_VERSION, name: 'script', origin: MOCK, language: 'EN',
+    parameters: [{ name: 'q', example: 'trading', required: true }],
+    steps: [{ id: 'automation', type: 'script', file: 'automation.mjs', reason: 'test', hosts: ['127.0.0.1'] }],
+    outcome: { fromStep: 'automation', expect: { path: '__http_ok', equals: 'true' }, extract: { records: 'rows' } },
+  };
+  const withScript = (runner) => ({ readToken: noToken, extractPage: async () => ({ httpStatus: 200, texts: [] }), runScript: runner });
+  const noRunner = await run(scriptSpec, { q: 'trading' }, { readToken: noToken, extractPage: async () => ({ httpStatus: 200, texts: [] }) });
+  check('script step: no runner available stops the run',
+    !noRunner.ok && /no script runner available/.test(noRunner.stoppedReason || ''), noRunner.stoppedReason);
+  const scriptFailed = await run(scriptSpec, { q: 'trading' }, withScript(async () => ({ error: 'the endpoint answered 500', hosts: [], log: [] })));
+  check('script step: a failing script stops the run with its own reason',
+    !scriptFailed.ok && scriptFailed.stoppedReason === 'script step "automation": the endpoint answered 500', scriptFailed.stoppedReason);
+  const scriptHung = await run(scriptSpec, { q: 'trading' }, withScript((file, inputs, hosts) =>
+    runScript('async function run(ctx) { void ctx.inputs.q; for (;;) {} }', { inputs, hosts, timeoutMs: 1200 })));
+  check('script step: a script that hangs stops the run with a named reason',
+    !scriptHung.ok && scriptHung.stoppedReason === 'script step "automation": the script exceeded 1.2s', scriptHung.stoppedReason);
+  const scriptRan = await run(scriptSpec, { q: 'trading' }, withScript((file, inputs, hosts) => runScript(
+    `async function run(ctx) { const r = await ctx.http.fetch('${MOCK}/api/urlsearch?q=' + encodeURIComponent(ctx.inputs.q)); return r.json().RECORDS; }`,
+    { inputs, hosts })));
+  check('script step: a working script replays and its rows become the outcome',
+    scriptRan.ok && scriptRan.extracted?.records.count === 5, scriptRan.stoppedReason ?? JSON.stringify(scriptRan.extracted));
+  const offHost = await run(scriptSpec, { q: 'trading' }, withScript((file, inputs, hosts) => runScript(
+    'async function run(ctx) { void ctx.inputs.q; return ctx.http.fetch("http://elsewhere.invalid/"); }', { inputs, hosts })));
+  check('script step: a host outside the verified list stops the run',
+    !offHost.ok && /outside the hosts this automation was verified against/.test(offHost.stoppedReason || ''), offHost.stoppedReason);
 } finally {
   mock.kill();
 }
