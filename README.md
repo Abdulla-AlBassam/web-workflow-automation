@@ -54,8 +54,9 @@ steps that reproduce the outcome. Step types: `request` (the default),
 time it loads the site and finds the anonymous bearer in web storage by
 shape), a chained `request` with a `link`, `browser-extract` for
 server-rendered pages, and `script` for a program the LLM assistant wrote
-for one session. A page field paired with a total in the response turns on
-fetch-all pagination. Marked values become named columns. Specs carry a
+for one session. A page number in the request body or the query string,
+paired with a total in the response, turns on fetch-all pagination. Marked
+values become named columns. Specs carry a
 version and regenerate when the generator changes.
 
 Execute (`runner/`). The runner takes a spec and new inputs, runs the steps,
@@ -112,7 +113,7 @@ on the real site.
 - Two-step lookups, search then detail, re-resolved per input. Live:
   wwe.com.
 - Server-rendered detail pages read by a browser step. Live: wwe.com bios.
-- Paged APIs, all pages fetched.
+- Paged APIs, page number in the body or the URL, all pages fetched.
 - A search that returned nothing during recording still yields a working
   automation.
 
@@ -150,8 +151,6 @@ Neither layer:
   challenge did not record usefully (iNaturalist).
 - PDF, CSV downloads and images as outcomes.
 - Results opening in a new tab. Only the active tab is recorded.
-- URL-borne pagination (`?page=2`). Only a page field in the body is
-  detected.
 - More than one hop in the deterministic chain. A script may chain further.
 
 Why the line is where it is: an automation is handed over only when the

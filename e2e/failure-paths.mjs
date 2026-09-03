@@ -144,6 +144,51 @@ try {
   check('headers: only-credential headers leave no reqHeaders at all', !('reqHeaders' in empty), JSON.stringify(empty));
   const hRun = await run(hSpec, { [pname]: '84121' }, { readToken: noToken });
   check('headers: replay with recorded headers still validates against the mock', hRun.ok, hRun.stoppedReason);
+
+  // === Deterministic pipeline: stops the runner must name, not throw ===
+  // run() never throws: a dependency that raises, or a site that answers
+  // half a response, still comes back as { ok: false, stoppedReason }.
+  const cutSpec = structuredClone(spec);
+  cutSpec.steps[0].url = `${MOCK}/api/cutoff`;
+  const cut = await run(cutSpec, { [pname]: '84121' }, { readToken: noToken });
+  check('a response that ends early stops the run with a named reason',
+    !cut.ok && /ended early/.test(cut.stoppedReason || ''), cut.stoppedReason);
+
+  const scriptSpec = structuredClone(spec);
+  scriptSpec.steps = [{ id: 'automation', type: 'script', file: 'automation.mjs', reason: 'test', hosts: [] }];
+  const scriptThrows = await run(scriptSpec, { [pname]: '84121' }, {
+    readToken: noToken,
+    runScript: async () => { throw new Error('ENOENT: no such file or directory\nmore lines'); },
+  });
+  check('a script runner that throws stops the run with a named reason',
+    !scriptThrows.ok && /^script step "automation": ENOENT: no such file or directory$/.test(scriptThrows.stoppedReason || ''),
+    scriptThrows.stoppedReason);
+
+  // === Deterministic pipeline: a submitted form's fields ===
+  // The recorder names hidden fields without their values and redacts
+  // passwords; the backend keeps the same promises on whatever arrives, and
+  // tolerates a shape it does not recognise instead of throwing.
+  const submitted = (form) => sanitise({ kind: 'action', action: 'submit', target: { id: 'f' }, form }, []).form;
+  const fields = submitted({ method: 'POST', action: `${MOCK}/search`, fields: [
+    { name: 'cr_name_en', value: 'trading' },
+    { name: '__RequestVerificationToken', hidden: true, value: 'leaked-token' },
+    { name: 'user_password', value: 'hunter2' },
+    { name: 'OTP', value: '123456' },
+    { name: 'lang', value: 'EN', label: 'English' },
+    { value: 'nameless' },
+    'not-a-field',
+  ] }).fields;
+  check('form: an ordinary field keeps its value and its label',
+    fields[0].value === 'trading' && fields.find((f) => f.name === 'lang')?.label === 'English', JSON.stringify(fields));
+  check('form: a hidden field is named, never valued',
+    fields[1].name === '__RequestVerificationToken' && fields[1].hidden === true && !('value' in fields[1]), JSON.stringify(fields[1]));
+  check('form: a secret-named field keeps no value',
+    fields[2].value === '[REDACTED]' && fields[3].value === '[REDACTED]', JSON.stringify(fields.slice(2, 4)));
+  check('form: a field that cannot be named is dropped', fields.length === 5, JSON.stringify(fields));
+  check('form: a shape the recorder never writes is left alone, not thrown on',
+    submitted('garbage') === 'garbage' && submitted({ method: 'POST' }).fields === undefined &&
+    submitted({ fields: 'nope' }).fields === 'nope' && submitted(null) === null,
+    JSON.stringify([submitted('garbage'), submitted({ method: 'POST' }), submitted({ fields: 'nope' })]));
 } finally {
   mock.kill();
 }

@@ -28,6 +28,24 @@ export function replayableHeaders(h: unknown): Record<string, string> {
   return out;
 }
 
+// A submitted form's fields, by the same promise the recorder makes: a hidden
+// field is named and never valued, and a field named like a secret keeps no
+// value either: a site may call a password field something else entirely.
+const SECRET_FIELD = /pass(word|wd|code)?$|passwd|pwd|secret|otp|pin$|token$/i;
+
+function scrubFields(fields: unknown[]): unknown[] {
+  const out: unknown[] = [];
+  for (const f of fields) {
+    // A field we cannot name is a field we cannot vouch for.
+    if (!f || typeof f !== 'object' || typeof (f as Record<string, unknown>).name !== 'string') continue;
+    const field = { ...(f as Record<string, unknown>) };
+    if (field.hidden) delete field.value;
+    else if (SECRET_FIELD.test(field.name as string) && 'value' in field) field.value = '[REDACTED]';
+    out.push(field);
+  }
+  return out;
+}
+
 export function hostAllowed(url: unknown, hosts: string[]): boolean {
   if (typeof url !== 'string') return false;
   try {
@@ -71,6 +89,12 @@ export function sanitise(evt: Record<string, unknown>, _hosts: string[]): Record
       }
     }
     if (Object.keys(clean).length) out.resHeaders = clean; else delete out.resHeaders;
+  }
+  // A submit event's reconstructed form. A shape that is not the recorder's
+  // is left alone rather than dropped: it carries nothing we promised about.
+  const form = out.form as Record<string, unknown> | undefined;
+  if (form && typeof form === 'object' && Array.isArray(form.fields)) {
+    out.form = { ...form, fields: scrubFields(form.fields) };
   }
   if (out.kind === 'net' || out.kind === 'net_meta') {
     if (typeof out.url !== 'string' || !/^https?:\/\//.test(out.url)) return undefined;

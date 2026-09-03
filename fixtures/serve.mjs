@@ -55,10 +55,32 @@ createServer((req, res) => {
     });
   } else if (req.method === 'GET' && req.url.startsWith('/api/urlsearch')) {
     // GET-style search: the term arrives in the query string, like wwe.com.
-    const q = new URL(req.url, `http://127.0.0.1:${PORT}`).searchParams.get('q') ?? '';
+    // A page number in the query string is honoured when present, so
+    // URL-borne pagination is testable; without one the whole set comes back.
+    const params = new URL(req.url, `http://127.0.0.1:${PORT}`).searchParams;
+    const q = params.get('q') ?? '';
     const hits = COMPANIES.filter((c) => c.NAME_EN.toLowerCase().includes(q.toLowerCase()));
+    const page = Number(params.get('page'));
+    // break=500|html breaks the pages after the first, so a replay that fails
+    // mid-pagination has something to fail against.
+    const broken = page > 1 && params.get('break');
+    if (broken === '500') { res.writeHead(500).end(); return; }
+    if (broken === 'html') { res.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><p>page unavailable</p>'); return; }
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ TOTAL: hits.length, RECORDS: hits }));
+    res.end(JSON.stringify({ TOTAL: hits.length, RECORDS: page > 0 ? hits.slice((page - 1) * PER_PAGE, page * PER_PAGE) : hits }));
+  } else if (req.method === 'POST' && req.url === '/api/strictpage') {
+    // Some APIs type their page number as a string and reject a number, so
+    // the runner must re-issue the page as the type the recording carried.
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const q = JSON.parse(body || '{}');
+      if (typeof q.PAGE !== 'string') { res.writeHead(400, { 'content-type': 'application/json' }).end('{"error":"PAGE must be a string"}'); return; }
+      const hits = COMPANIES.filter((c) => c.NAME_EN.toLowerCase().includes(String(q.CR_NAME_EN ?? '').toLowerCase()));
+      const page = Math.max(1, Number(q.PAGE) || 1);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ TOTAL: hits.length, RECORDS: hits.slice((page - 1) * PER_PAGE, page * PER_PAGE) }));
+    });
   } else if (req.method === 'GET' && /^\/company\/\d+$/.test(req.url)) {
     // Server-rendered detail page: the bio exists only in the HTML, never in
     // a JSON response — the shape that forces a browser-extract step.
@@ -89,6 +111,14 @@ createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ nbHits: hits.length, hits }));
     });
+  } else if (req.url === '/api/cutoff') {
+    // Promises a body and drops the connection halfway: what a proxy or a
+    // dying server does, and the runner must name it rather than throw.
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': '2000' });
+    res.write('{"TOTAL":1,"RECORDS":[');
+    // Long enough for the client to have the headers, so the failure lands
+    // while the body is being read rather than on connect.
+    setTimeout(() => res.socket.destroy(), 50);
   } else if (req.method === 'GET' && req.url === '/noise') {
     res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
     res.end('{"noise":true}');

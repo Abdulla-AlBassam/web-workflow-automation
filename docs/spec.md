@@ -80,6 +80,8 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
       // scope "row" resolves against each record; "body" against the whole response
     ],
     "pagination": { "pagePath": "PaginationParams.Page" }   // page-based outcomes: runner fetches all pages
+    // or { "pageParam": "page" } when the page number rides in the URL's
+    // query string instead of the body (?q=trading&page=1)
   }
 }
 ```
@@ -92,6 +94,7 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
 - **Chains are correlated too.** A `link` step exists because a value from the previous step's response appeared in the later request's URL, with positive evidence (a marked value in the later response, or a recorded click leading to it). The runner re-resolves the link from the fresh response on every run.
 - **Columns come from marks.** The operator's highlighted text is located in the outcome response at generate time; the spec stores paths, so a new input yields the same fields for its own data. Matching compares letters and digits only (reference markers, pronunciation glyphs and punctuation are ignored), accepts any shared 80-character stretch of a long selection, prefers an exact field over a containing one, and a field inside the record set over one elsewhere.
 - **Record sets may be keyed.** `extract.records` resolves to an array, or to a map of records keyed by id (MediaWiki `pages`), or to one bare record; a path the response lacks yields zero rows, never the whole response as one row.
+- **Pagination is page numbers only.** `pagination` says where the outcome request carried its page number: `pagePath` for a field in the JSON body, `pageParam` for a query parameter of the URL. Either one counts only when the response also carried a total, which is what tells a replay when to stop; a page number on its own proves nothing. The runner re-issues the outcome request page by page, keeping every other query parameter and the type a body field used (an API that types its page as `"1"` is answered with a string), and stops with a named reason when a page fails to arrive, stops parsing as JSON, or stops matching the outcome gate.
 - **Model-built specs carry provenance.** A spec written by a model loop has `repaired: { at, model, diagnosis, mode, feedback?, summary? }`; `mode` is `repair` (the analyser had refused), `refine` (a run was flagged, `feedback` holding the operator's note) `effort` (Maximum Effort Mode's API loop, `feedback` holding the operator's goal and `summary` the model's account of what the automation returns and which recorded choices are baked in) or `import` (the same shape written by an external model from the exported brief and verified on import; `model` is `external`). Such specs are never regenerated.
 - **The outcome is validated, never assumed.** `outcome.expect` is a deterministic check on the final response. The runner stops with a named reason when it fails.
 - **Language is explicit.** The recorded UI language is pinned into the spec so a replay does not inherit the runner's default.

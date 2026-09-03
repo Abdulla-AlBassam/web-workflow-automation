@@ -384,6 +384,131 @@ try {
   const cleared = await api('/api/sessions/enh/name', { name: '' });
   check('empty rename reverts to the id', cleared.ok && cleared.name === null &&
     (await api('/api/sessions')).find((s) => s.session === 'enh')?.name === undefined);
+
+  // === Deterministic pipeline: URL-borne pagination and recorder-field noise ===
+
+  // The page number rides in the query string rather than the body. Five
+  // "trading" hits at 2 per page means the replay must make three calls.
+  await api('/api/sessions', { session: 'urlpage', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/urlpage/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'trading', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'GET', url: `${MOCK}/api/urlsearch?q=trading&page=1`, status: 200,
+      resBody: JSON.stringify({ TOTAL: 5, RECORDS: [{ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L' }, { CR_NO: '91230', NAME_EN: 'Delmon Trading W.L.L' }] }), seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]});
+  await api('/api/sessions/urlpage/stop', {});
+  const urlPageSpec = await api('/api/sessions/urlpage/spec', {});
+  check('URL page parameter detected as pagination',
+    urlPageSpec.outcome?.pagination?.pageParam === 'page', JSON.stringify(urlPageSpec.outcome?.pagination));
+  check('URL pagination keeps the page number out of the parameters',
+    urlPageSpec.parameters?.length === 1 && urlPageSpec.steps?.at(-1)?.url?.endsWith('?q={{cr_name_en}}&page=1'),
+    urlPageSpec.steps?.at(-1)?.url);
+  const urlPageRun = await api('/api/sessions/urlpage/run', { params: { cr_name_en: 'trading' } });
+  check('URL-paginated replay fetches every page',
+    urlPageRun.ok && urlPageRun.extracted?.records?.count === 5 &&
+    urlPageRun.steps?.some((s) => s.type === 'pagination'),
+    urlPageRun.stoppedReason ?? `count=${urlPageRun.extracted?.records?.count}`);
+  // Rewriting the page number re-serialises the whole query string, so a
+  // value carrying a space must still reach the site as that value.
+  const urlPageSpaced = await api('/api/sessions/urlpage/run', { params: { cr_name_en: ' Trading' } });
+  check('URL pagination: a spaced value survives the page rewrite',
+    urlPageSpaced.ok && urlPageSpaced.extracted?.records?.count === 5,
+    urlPageSpaced.stoppedReason ?? `count=${urlPageSpaced.extracted?.records?.count}`);
+  const urlPageOne = await api('/api/sessions/urlpage/run', { params: { cr_name_en: 'gulf line' } });
+  check('URL pagination: a single-page result makes no extra call',
+    urlPageOne.ok && urlPageOne.extracted?.records?.count === 1 &&
+    !urlPageOne.steps.some((s) => s.type === 'pagination'),
+    urlPageOne.stoppedReason ?? JSON.stringify(urlPageOne.steps));
+
+  // A page number with no total in the response is not evidence of paging:
+  // nothing would tell the replay when to stop.
+  await api('/api/sessions', { session: 'urlnototal', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/urlnototal/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'gulf line', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'GET', url: `${MOCK}/api/urlsearch?q=gulf%20line&page=1`, status: 200,
+      resBody: JSON.stringify({ RECORDS: [{ CR_NO: '20775', NAME_EN: 'Gulf Line Logistics' }] }), seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]});
+  await api('/api/sessions/urlnototal/stop', {});
+  const noTotalSpec = await api('/api/sessions/urlnototal/spec', {});
+  check('a URL page number without a total is not pagination',
+    !!noTotalSpec.steps && noTotalSpec.outcome?.pagination === undefined,
+    JSON.stringify(noTotalSpec.outcome));
+
+  // Mid-pagination failures stop with a named reason rather than returning a
+  // short result as though it were the whole set.
+  const urlPagePath = join(dataDir, 'urlpage', 'spec.json');
+  const urlPageSaved = JSON.parse(readFileSync(urlPagePath, 'utf8'));
+  const breakPages = (mode) => {
+    const broken = structuredClone(urlPageSaved);
+    broken.steps.at(-1).url += `&break=${mode}`;
+    writeFileSync(urlPagePath, JSON.stringify(broken));
+    return api('/api/sessions/urlpage/run', { params: { cr_name_en: 'trading' } });
+  };
+  const gone = await breakPages('500');
+  check('a page that fails mid-pagination stops with a named reason',
+    !gone.ok && /pagination failed at page 2: outcome check no longer matched \(HTTP 500\)/.test(gone.stoppedReason ?? ''),
+    gone.stoppedReason);
+  const notJson = await breakPages('html');
+  check('a page that stops being JSON stops with a named reason',
+    !notJson.ok && /pagination failed at page 2: response was not JSON/.test(notJson.stoppedReason ?? ''),
+    notJson.stoppedReason);
+  writeFileSync(urlPagePath, JSON.stringify(urlPageSaved));
+
+  // A page field the API types as a string is pagination too, and the replay
+  // must send a string back: the strict endpoint rejects a number outright.
+  await api('/api/sessions', { session: 'strpage', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/strpage/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'trading', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/strictpage`, status: 200,
+      reqBody: JSON.stringify({ CR_NAME_EN: 'trading', PAGE: '1' }),
+      resBody: JSON.stringify({ TOTAL: 5, RECORDS: [{ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L' }, { CR_NO: '91230', NAME_EN: 'Delmon Trading W.L.L' }] }), seq: 3 },
+    { kind: 'session_stop', seq: 4 },
+  ]});
+  await api('/api/sessions/strpage/stop', {});
+  const strPageSpec = await api('/api/sessions/strpage/spec', {});
+  check('a string-typed page field is pagination too',
+    strPageSpec.outcome?.pagination?.pagePath === 'PAGE', JSON.stringify(strPageSpec.outcome?.pagination));
+  const strPageRun = await api('/api/sessions/strpage/run', { params: { cr_name_en: 'trading' } });
+  check('the replay re-issues the page as the string the recording used',
+    strPageRun.ok && strPageRun.extracted?.records?.count === 5,
+    strPageRun.stoppedReason ?? `count=${strPageRun.extracted?.records?.count}`);
+
+  // The recorder's richer fields (submit forms, select labels, click HTML,
+  // response headers, snapshots) are evidence for the model loops, not inputs
+  // to the correlation: a malformed one must not cost a session its
+  // automation, its analysis or its page.
+  await api('/api/sessions', { session: 'noisy', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/noisy/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    { kind: 'action', action: 'input', value: 'trading', target: { id: 'cr_name_en' }, seq: 2 },
+    { kind: 'action', action: 'change', value: 'EN', label: 'English', target: { id: 'lang' }, seq: 3 },
+    { kind: 'action', action: 'click', target: { id: 'go' }, html: `<div>${'x'.repeat(120_000)}</div>`, seq: 4 },
+    { kind: 'action', action: 'submit', target: { id: 'f1' }, form: 'garbage', seq: 5 },
+    { kind: 'action', action: 'submit', target: { id: 'f2' }, form: { method: 'POST' }, seq: 6 },
+    { kind: 'snapshot', url: `${MOCK}/`, reason: 'load', text: 'Awal Trading Co. W.L.L', storage: null, seq: 7 },
+    { kind: 'net', method: 'POST', url: `${MOCK}/api/CRdetails/AdvanceSearchCR_Paging`, status: 200,
+      reqHeaders: { 'x-app-id': 'demo' }, resHeaders: { 'content-type': 'application/json' },
+      reqBody: JSON.stringify({ CR_NAME_EN: 'trading', PAGE: 1 }),
+      resBody: JSON.stringify({ TOTAL: 5, RECORDS: [{ CR_NO: '139867', NAME_EN: 'Awal Trading Co. W.L.L' }, { CR_NO: '91230', NAME_EN: 'Delmon Trading W.L.L' }] }), seq: 8 },
+    { kind: 'session_stop', seq: 9 },
+  ]});
+  const noisyStop = await api('/api/sessions/noisy/stop', {});
+  check('malformed recorder fields do not stop the analysis', noisyStop.spec === true);
+  const noisyRun = await api('/api/sessions/noisy/run', { params: { cr_name_en: 'trading' } });
+  check('a recording carrying them still replays',
+    noisyRun.ok && noisyRun.extracted?.records?.count === 5,
+    noisyRun.stoppedReason ?? `count=${noisyRun.extracted?.records?.count}`);
+  const noisyPage = await fetch(`${BACKEND}/session/noisy`);
+  check('its session page still renders',
+    noisyPage.status === 200 && (await noisyPage.text()).includes('Timeline'), String(noisyPage.status));
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

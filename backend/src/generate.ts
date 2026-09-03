@@ -3,7 +3,7 @@ import { requestHeaders } from './probe.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 15;
+export const SPEC_VERSION = 16;
 
 export type Spec = {
   version: number;
@@ -22,7 +22,9 @@ export type Spec = {
     columns?: Column[];
     // Present when the outcome call is page-based: the runner re-issues it
     // with an incremented page value until the extracted total is reached.
-    pagination?: { pagePath: string };
+    // The page number lives in the request body (pagePath) or in the URL's
+    // query string (pageParam), whichever the recording used.
+    pagination?: { pagePath: string } | { pageParam: string };
   };
   // Present when the spec came from the LLM repair loop rather than the
   // deterministic generator. Such specs are never auto-regenerated: the
@@ -221,16 +223,27 @@ export function missingMarks(body: unknown, marks: string[]): string[] {
   return marks.filter((mark) => !objectHasMark(body, mark));
 }
 
-// Page-based outcome: a numeric request field named like "page" plus a total
-// in the response means the recording only saw one page of the result.
-function detectPagination(call: Call, extract: Record<string, string>): { pagePath: string } | undefined {
+// Page-based outcome: a request page number named like one, plus a total in
+// the response, means the recording only saw one page of the result. The
+// number sits in the JSON body or in the URL's query string; a page number
+// without a total proves nothing, so both halves are required.
+const PAGE_PARAM = /^(page|p|pg|page_?number|page_?no|pagenum)$/i;
+function detectPagination(call: Call, extract: Record<string, string>): { pagePath: string } | { pageParam: string } | undefined {
   if (!extract.total || !extract.records) return undefined;
   // Form-encoded bodies cannot express a re-issuable JSON page field.
   let body: unknown;
-  try { body = JSON.parse(call.reqBody ?? '{}'); } catch { return undefined; }
+  try { body = JSON.parse(call.reqBody ?? '{}'); } catch { body = undefined; }
   for (const { path, value } of leaves(body)) {
     const key = path.split('.').at(-1) ?? '';
-    if (/^page(_?number)?$/i.test(key) && typeof value === 'number') return { pagePath: path };
+    // A page field typed as a string ("1") is as re-issuable as a number:
+    // the runner keeps whichever type the recording used.
+    const paged = typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value));
+    if (paged && /^page(_?number)?$/i.test(key)) return { pagePath: path };
+  }
+  let u: URL;
+  try { u = new URL(call.url); } catch { return undefined; }
+  for (const [key, value] of u.searchParams) {
+    if (PAGE_PARAM.test(key) && /^\d+$/.test(value)) return { pageParam: key };
   }
   return undefined;
 }

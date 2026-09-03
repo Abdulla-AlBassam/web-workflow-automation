@@ -141,7 +141,14 @@ export async function run(spec: Spec, params: Record<string, string>, deps: RunD
       steps.push({ id: step.id, type: step.type, detail: `token from ${tok.source} (${tok.bearer.length} chars)` });
     } else if (step.type === 'script') {
       if (!deps.runScript) return { ok: false, stoppedReason: `script step "${step.id}": no script runner available`, steps };
-      const r = await deps.runScript(step.file, params, step.hosts);
+      // A runner that throws rather than reporting (the script file gone from
+      // beside the spec) is a stop with a reason, like the browser steps.
+      let r: ScriptResult;
+      try {
+        r = await deps.runScript(step.file, params, step.hosts);
+      } catch (e) {
+        return { ok: false, stoppedReason: `script step "${step.id}": ${(e as Error).message.split('\n')[0]}`, steps };
+      }
       if ('error' in r) {
         return { ok: false, stoppedReason: `script step "${step.id}": ${r.error}`, steps };
       }
@@ -201,7 +208,14 @@ export async function run(spec: Spec, params: Record<string, string>, deps: RunD
       } catch (e) {
         return { ok: false, stoppedReason: `request "${step.id}" failed to reach ${url}: ${(e as Error).message}`, steps };
       }
-      const text = await res.text();
+      // A connection that drops while the body is arriving is a named stop
+      // too: the request reached the site, the answer did not arrive whole.
+      let text: string;
+      try {
+        text = await res.text();
+      } catch (e) {
+        return { ok: false, stoppedReason: `request "${step.id}": the response from ${url} ended early: ${(e as Error).message}`, steps };
+      }
       let parsed: unknown;
       try { parsed = JSON.parse(text); } catch { parsed = text; }
       responses[step.id] = parsed;
@@ -245,15 +259,22 @@ export async function run(spec: Spec, params: Record<string, string>, deps: RunD
   const total = Number(extracted.total);
   if (pg && outcomeRequest && records && !Number.isNaN(total) && records.rows.length > 0 && total > records.rows.length) {
     const all = [...records.rows];
-    let page = Number(resolvePath(outcomeRequest.body, pg.pagePath)) || 1;
+    // The page number lives in the body or in the query string; rewriting the
+    // URL through the URL API keeps every other parameter as it was sent.
+    const url = new URL(outcomeRequest.url);
+    const bodyPage = 'pagePath' in pg ? resolvePath(outcomeRequest.body, pg.pagePath) : undefined;
+    let page = Number('pagePath' in pg ? bodyPage : url.searchParams.get(pg.pageParam)) || 1;
     while (all.length < total && page < MAX_PAGES) {
       page++;
       await new Promise((r) => setTimeout(r, PAGE_DELAY_MS));
-      setPath(outcomeRequest.body, pg.pagePath, page);
+      // An API that types its page field as a string is sent a string back.
+      if ('pagePath' in pg) setPath(outcomeRequest.body, pg.pagePath, typeof bodyPage === 'string' ? String(page) : page);
+      else url.searchParams.set(pg.pageParam, String(page));
       let res: Response;
       try {
-        res = await fetch(outcomeRequest.url, {
-          method: outcomeRequest.method, headers: outcomeRequest.headers, body: JSON.stringify(outcomeRequest.body),
+        res = await fetch(url.toString(), {
+          method: outcomeRequest.method, headers: outcomeRequest.headers,
+          ...(outcomeRequest.body === undefined ? {} : { body: JSON.stringify(outcomeRequest.body) }),
         });
       } catch (e) {
         return { ok: false, stoppedReason: `pagination failed at page ${page}: ${(e as Error).message}`, steps };
@@ -262,6 +283,9 @@ export async function run(spec: Spec, params: Record<string, string>, deps: RunD
       const pageOk = expect.path === '__http_ok' ? res.ok : String(resolvePath(body, expect.path)) === expect.equals;
       if (!pageOk) {
         return { ok: false, stoppedReason: `pagination failed at page ${page}: outcome check no longer matched (HTTP ${res.status})`, steps };
+      }
+      if (body === undefined) {
+        return { ok: false, stoppedReason: `pagination failed at page ${page}: response was not JSON (HTTP ${res.status})`, steps };
       }
       const rows = resolvePath(body, extract.records) as unknown[] | undefined;
       if (!Array.isArray(rows) || rows.length === 0) break;
