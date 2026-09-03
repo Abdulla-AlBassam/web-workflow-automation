@@ -199,7 +199,7 @@ ${ev.snapshots.map((s) => {
     const st = s.storage as { local?: string[]; session?: string[] } | undefined;
     const storage = st && (st.local?.length || st.session?.length) ? `; web storage keys (names only): local [${(st.local ?? []).join(', ')}] session [${(st.session ?? []).join(', ')}]` : '';
     return `- #${s.seq} (${s.reason}) ${s.url}${s.title ? ` "${String(s.title).slice(0, 80)}"` : ''} — ${String(s.text ?? '').length} chars of text, ${String(s.html ?? '').length} chars of pruned HTML${s.htmlTruncated ? ' (cut by the recorder)' : ''}${storage}`;
-  }).join('\n') || 'none — this recording has no page snapshots (made before snapshots existed, or the extension was not reloaded); the captured calls are the only evidence'}`);
+  }).join('\n') || 'none — this recording has no page snapshots (made before snapshots existed, or the extension was not reloaded); the captured calls are the only evidence'}${ev.meta.snapshotsDropped ? `\n\n${ev.meta.snapshotsDropped} further snapshot(s) of states in between were dropped by the session cap; every page load, page left and the final state is here.` : ''}`);
 
   doc.add('the recording in order', overview(ev.events, ev.a), (b, cut) => `### The recording, in order
 

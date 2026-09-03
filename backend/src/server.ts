@@ -1,6 +1,6 @@
 import Fastify, { type FastifyReply } from 'fastify';
 import { existsSync, readFileSync } from 'node:fs';
-import { appendEvents, appendLog, createSession, getMeta, getScript, getSpec, listSessions, readEvents, readLog, saveBrief, saveMeta, saveSpec, status } from './store.js';
+import { appendEvents, appendLog, createSession, getMeta, getScript, getSpec, listSessions, readEvents, readLog, saveBrief, saveMeta, saveSpec, status, type Meta } from './store.js';
 import { repairSession } from './repair.js';
 import { Inbox, maxEffort } from './effort.js';
 import { buildBrief, DEFAULT_BUDGET } from './brief.js';
@@ -45,6 +45,22 @@ app.post('/api/sessions', async (req, reply) => {
   return { ok: true };
 });
 
+// A chatty page can produce a distinct snapshot every few seconds, each up to
+// 600 KB. Past the cap only the states nothing else records are still kept: a
+// page loaded, a page left, the last state at stop. What was dropped is
+// counted, never silent.
+const SNAPSHOT_CAP = 40;
+const ALWAYS_KEPT = /^(load|leave|stop)$/;
+
+function keepSnapshot(meta: Meta, snap: Record<string, unknown>): boolean {
+  if ((meta.snapshots ?? 0) >= SNAPSHOT_CAP && !ALWAYS_KEPT.test(String(snap.reason))) {
+    meta.snapshotsDropped = (meta.snapshotsDropped ?? 0) + 1;
+    return false;
+  }
+  meta.snapshots = (meta.snapshots ?? 0) + 1;
+  return true;
+}
+
 app.post('/api/sessions/:id/events', async (req, reply) => {
   const { id } = req.params as { id: string };
   const meta = getMeta(id);
@@ -57,8 +73,9 @@ app.post('/api/sessions/:id/events', async (req, reply) => {
   const kept: Record<string, unknown>[] = [];
   for (const item of items) {
     const clean = sanitise(item, meta.hosts);
-    if (clean) kept.push(clean);
-    else meta.dropped++;
+    if (!clean) { meta.dropped++; continue; }
+    if (clean.kind === 'snapshot' && !keepSnapshot(meta, clean)) continue;
+    kept.push(clean);
   }
   if (kept.length) appendEvents(id, kept);
   meta.count += kept.length;

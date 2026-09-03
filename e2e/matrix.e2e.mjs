@@ -1,7 +1,8 @@
 // Scenario-matrix acceptance suite: real Chromium + the built extension
-// recording against eight mini-sites (fixtures/sites.mjs), each a distinct
+// recording against eleven mini-sites (fixtures/sites.mjs), each a distinct
 // real-world shape — composite-string APIs, form posts, Arabic data, token
-// gates, header gates, server-rendered pages, awkward values, pagination. Positive
+// gates, header gates, server-rendered pages, awkward values, pagination,
+// contenteditable comboboxes, shadow roots, scripted submits. Positive
 // scenarios must record, generate and replay; negative ones must refuse with
 // a reason. Run: npm run test:matrix (needs ports 4823 and 4985 free).
 import { chromium } from 'playwright';
@@ -214,6 +215,75 @@ try {
   check('headered: replay sends the headers and returns rows',
     hdRun.ok && hdRun.extracted?.records?.rows?.[0]?.name === 'Smith + Jones Ltd',
     hdRun.stoppedReason ?? JSON.stringify(hdRun.extracted?.records?.rows));
+
+  // --- what the page never reports: typed values with no change event,
+  // controls inside a shadow root, forms submitted from script ---------------
+
+  // 9. A contenteditable combobox fires no change event at all: the value is
+  // recorded when typing pauses, once, and correlates like any other input.
+  await record('/combo/', 'mx-combo', async (p) => {
+    await p.locator('#cb_name').pressSequentially('gulf gum');
+    await p.keyboard.press('Enter');
+    await p.waitForSelector('#results tbody tr');
+  });
+  const cbEvents = (await api('/api/sessions/mx-combo/export')).events;
+  const cbTyped = cbEvents.filter((e) => e.kind === 'action' && e.action === 'input' && e.target?.id === 'cb_name');
+  check('combobox: the typed value is recorded exactly once',
+    cbTyped.length === 1 && cbTyped[0].value === 'gulf gum', JSON.stringify(cbTyped.map((e) => e.value)));
+  const cbSpec = await api('/api/sessions/mx-combo/spec', {});
+  check('combobox: the typed value becomes the parameter',
+    cbSpec.parameters?.[0]?.name === 'cb_name' && cbSpec.steps?.at(-1)?.bodyTemplate?.name === '{{cb_name}}',
+    JSON.stringify(cbSpec.parameters ?? cbSpec));
+  const cbRun = await api('/api/sessions/mx-combo/run', { params: { cb_name: 'smith' } });
+  check('combobox: replay with a new value returns rows',
+    cbRun.ok && cbRun.extracted?.records?.rows?.[0]?.name === 'Smith + Jones Ltd',
+    cbRun.stoppedReason ?? JSON.stringify(cbRun.extracted?.records?.rows));
+  // The typing pause must not double up with the change event an ordinary
+  // input does fire.
+  const algEvents = (await api('/api/sessions/mx-algolia/export')).events;
+  check('ordinary input: still exactly one event for the field',
+    algEvents.filter((e) => e.kind === 'action' && e.action === 'input' && e.target?.id === 'q').length === 1,
+    JSON.stringify(algEvents.filter((e) => e.action === 'input').map((e) => e.value)));
+
+  // 10. Search control inside an open shadow root: events are retargeted to
+  // the host, so only the composed path names what the operator used. The
+  // selector cannot cross the boundary; the id and the text still identify it.
+  await record('/shadow/', 'mx-shadow', async (p) => {
+    await p.fill('#sd_name', 'gulf gum');
+    await p.click('#sd_go');
+    await p.waitForSelector('#results tbody tr');
+  });
+  const sdEvents = (await api('/api/sessions/mx-shadow/export')).events;
+  check('shadow root: the value typed inside it is recorded',
+    sdEvents.some((e) => e.kind === 'action' && e.action === 'input' && e.target?.id === 'sd_name' && e.value === 'gulf gum'),
+    JSON.stringify(sdEvents.filter((e) => e.action === 'input').map((e) => [e.target?.tag, e.target?.id, e.value])));
+  check('shadow root: the click names the button, not its host',
+    sdEvents.some((e) => e.kind === 'action' && e.action === 'click' &&
+      e.target?.tag === 'button' && e.target?.id === 'sd_go' && e.target?.text === 'Search'),
+    JSON.stringify(sdEvents.filter((e) => e.action === 'click').map((e) => e.target)));
+  const sdRun = await api('/api/sessions/mx-shadow/run', { params: { sd_name: 'smith' } });
+  check('shadow root: the recording generates and replays',
+    sdRun.ok && sdRun.extracted?.records?.rows?.[0]?.name === 'Smith + Jones Ltd',
+    sdRun.stoppedReason ?? JSON.stringify(sdRun.extracted?.records?.rows));
+
+  // 11. form.submit() from script fires no submit event: the tap names the
+  // form and the recorder describes it exactly as a real submit is described.
+  await record('/scripted/', 'mx-scripted', async (p) => {
+    await p.fill('#q', 'gulf');
+    await Promise.all([p.waitForURL('**/scripted/results'), p.click('#go')]);
+  });
+  const scEvents = (await api('/api/sessions/mx-scripted/export')).events;
+  const scSubmits = scEvents.filter((e) => e.kind === 'action' && e.action === 'submit');
+  check('scripted submit: recorded once, with method, action and fields',
+    scSubmits.length === 1 && scSubmits[0].form?.method === 'POST' &&
+    /\/scripted\/results$/.test(scSubmits[0].form?.action ?? '') &&
+    JSON.stringify(scSubmits[0].form?.fields) === '[{"name":"name","value":"gulf"},{"name":"csrf","hidden":true}]',
+    JSON.stringify(scSubmits.map((e) => e.form)));
+  check('scripted submit: the hidden field is named, its value never kept',
+    !JSON.stringify(scEvents).includes('tok-93b17f'));
+  check('scripted submit: the POST navigation is in the evidence beside it',
+    scEvents.some((e) => e.kind === 'net_meta' && e.method === 'POST' && /\/scripted\/results$/.test(e.url)),
+    JSON.stringify(scEvents.filter((e) => e.kind === 'net_meta').map((e) => [e.method, e.url])));
 } catch (err) {
   check('harness ran to completion', false, String(err?.stack ?? err).slice(0, 400));
 } finally {

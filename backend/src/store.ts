@@ -14,6 +14,12 @@ export type Meta = {
   lastEventAt?: number;
   count: number;
   dropped: number;
+  // Snapshots are the bulkiest evidence a session carries, so they are capped.
+  // Kept ones are counted to enforce the cap batch by batch without re-reading
+  // the events file; dropped ones so the page and the brief can say what is
+  // missing.
+  snapshots?: number;
+  snapshotsDropped?: number;
 };
 
 const DATA_DIR = process.env.DATA_DIR ?? join(import.meta.dirname, '../data');

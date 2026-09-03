@@ -1,4 +1,4 @@
-// Scenario-matrix fixture: one server, eight mini-sites, each mimicking a
+// Scenario-matrix fixture: one server, eleven mini-sites, each mimicking a
 // distinct real-world site shape the analyser must handle (or refuse). Used by
 // e2e/matrix.e2e.mjs; never exposed beyond localhost.
 import { createServer } from 'node:http';
@@ -183,6 +183,74 @@ createServer(async (req, res) => {
     }
     const rows = byName(JSON.parse(await readBody(req)).q);
     return json(res, { total: rows.length, rows });
+  }
+
+  // 9. Custom combobox: a contenteditable div, the shape a framework search
+  // box takes. It fires no change event at all, so the typed value exists only
+  // while it is being typed; Enter sends it.
+  if (p === '/combo/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('Combobox Search', `
+<div id="cb_name" role="combobox" contenteditable="true" aria-label="Company name" style="border:1px solid #999;padding:6px;width:320px"></div>
+<table id="results"><tbody></tbody></table>
+<script>
+document.getElementById('cb_name').addEventListener('keydown', async (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const r = await fetch('/combo/api/search', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: e.target.innerText.trim() }) });
+  document.querySelector('#results tbody').innerHTML =
+    (await r.json()).rows.map((x) => '<tr><td>' + x.id + '</td><td>' + x.name + '</td></tr>').join('');
+});
+</script>`));
+  }
+  if (p === '/combo/api/search' && req.method === 'POST') {
+    const rows = byName(JSON.parse(await readBody(req)).name);
+    return json(res, { total: rows.length, rows });
+  }
+
+  // 10. Search control inside an open shadow root: every event is retargeted
+  // to the host, so only the composed path names the control the operator
+  // actually used.
+  if (p === '/shadow/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('Shadow Search', `
+<div id="host"></div>
+<script>
+const root = document.getElementById('host').attachShadow({ mode: 'open' });
+root.innerHTML = '<input id="sd_name"><button id="sd_go">Search</button><table id="results"><tbody></tbody></table>';
+root.getElementById('sd_go').addEventListener('click', async () => {
+  const r = await fetch('/shadow/api?name=' + encodeURIComponent(root.getElementById('sd_name').value));
+  root.querySelector('#results tbody').innerHTML =
+    (await r.json()).rows.map((x) => '<tr><td>' + x.id + '</td><td>' + x.name + '</td></tr>').join('');
+});
+</script>`));
+  }
+  if (p === '/shadow/api') {
+    const rows = byName(url.searchParams.get('name'));
+    return json(res, { total: rows.length, rows });
+  }
+
+  // 11. A form submitted from script: form.submit() fires no submit event, so
+  // without the tap's hook the recording would show a POST navigation and no
+  // record of what was sent. The hidden field is named, never kept.
+  if (p === '/scripted/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('Scripted Submit', `
+<form id="lookup" method="post" action="/scripted/results">
+  <input id="q" name="name"><input type="hidden" name="csrf" value="tok-93b17f">
+</form>
+<button id="go">Search</button>
+<script>
+document.getElementById('go').addEventListener('click', () => document.getElementById('lookup').submit());
+</script>`));
+  }
+  if (p === '/scripted/results' && req.method === 'POST') {
+    const rows = byName(new URLSearchParams(await readBody(req)).get('name'));
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('Results', `<table><tbody>${
+      rows.map((r) => `<tr><td>${r.id}</td><td>${r.name}</td></tr>`).join('')
+    }</tbody></table>`));
   }
 
   res.writeHead(404).end();

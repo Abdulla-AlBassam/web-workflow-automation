@@ -146,4 +146,18 @@ XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyIn
   return origSend.call(this, body as any);
 };
 
+// form.submit() from script fires no submit event (only requestSubmit does),
+// so a classic POST built in code would leave the recorder with a navigation
+// and no idea what was sent. Only the form's index in document.forms travels;
+// the isolated world reads the fields, where the password and hidden-value
+// rules already live.
+const origSubmit = HTMLFormElement.prototype.submit;
+HTMLFormElement.prototype.submit = function (this: HTMLFormElement) {
+  if (on) {
+    const index = Array.prototype.indexOf.call(document.forms, this);
+    if (index >= 0) window.postMessage({ __wfr: 'submit', index }, '*');
+  }
+  return origSubmit.call(this);
+};
+
 export {};

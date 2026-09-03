@@ -487,6 +487,7 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
         <span>${esc(a.language)}</span><span class="sep">·</span>
         <span>${a.inputs.length} input${a.inputs.length === 1 ? '' : 's'}</span>
         ${meta.dropped ? `<span class="sep">·</span><span class="chip chip-warn">${meta.dropped} dropped</span>` : ''}
+        ${meta.snapshotsDropped ? `<span class="sep">·</span><span class="chip chip-warn">${meta.snapshotsDropped} snapshots dropped</span>` : ''}
       </div>
       ${st === 'interrupted' ? '<p class="note" style="margin-top:12px">Interrupted session: reviewable evidence only, not eligible for automation.</p>' : ''}
     </div>

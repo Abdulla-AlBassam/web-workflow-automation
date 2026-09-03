@@ -81,8 +81,10 @@ try {
   // Highlight the first result's name: the mark chip must appear, and clicking
   // it must record the selection as wanted data. Drag-select rather than
   // triple-click: Chromium's triple-click no longer selects text inside an
-  // anchor, and the drag is the gesture operators are taught anyway.
-  const dragSelect = async (selector) => {
+  // anchor, and the drag is the gesture operators are taught anyway. A plain
+  // click is the point: the chip follows the selection instead of being torn
+  // down and rebuilt, so there is nothing to race.
+  const mark = async (selector) => {
     const box = await page.locator(selector).boundingBox();
     // Top of the first line to the bottom of the last: a horizontal drag at
     // mid-height dies on the boundary between two text lines.
@@ -90,32 +92,15 @@ try {
     await page.mouse.down();
     await page.mouse.move(box.x + box.width - 4, box.y + box.height - 6, { steps: 6 });
     await page.mouse.up();
-    await page.waitForTimeout(300); // each mouseup re-renders the chip; let it settle
+    await page.click('[data-wfr="chip"]');
   };
-  // The chip is re-created on every mouseup, which defeats Playwright's
-  // stability check for a plain click; hand it the mousedown its handler
-  // listens for and confirm the mark took, re-selecting if the chip went.
-  const markChip = async (selector) => {
-    for (let i = 0; i < 8; i++) {
-      try {
-        const chip = page.locator('[data-wfr="chip"]');
-        await chip.waitFor({ timeout: 2000 });
-        await chip.dispatchEvent('mousedown');
-        if ((await chip.textContent()) === 'Marked ✓') { await page.waitForTimeout(800); return; }
-      } catch {}
-      await dragSelect(selector);
-    }
-    throw new Error(`mark chip never accepted the click for ${selector}`);
-  };
-  await dragSelect('#results tbody tr td:nth-child(2)');
-  await markChip('#results tbody tr td:nth-child(2)');
+  await mark('#results tbody tr td:nth-child(2)');
 
   // Follow the result into its detail view and mark the bio: the recording now
   // carries a chained workflow (search → detail).
   await page.click('#results tbody a');
   await page.waitForSelector('#bio:not([hidden])');
-  await dragSelect('#bio_text');
-  await markChip('#bio_text');
+  await mark('#bio_text');
   await page.waitForTimeout(600); // let the recorder's 250ms batch flush drain
 
   const stopped = await sw.evaluate(() => globalThis.wfr.stop());

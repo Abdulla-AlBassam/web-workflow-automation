@@ -76,6 +76,16 @@ function describe(el: Element): Evt {
   return d;
 }
 
+// The element the operator actually hit. Inside an open shadow root e.target
+// is retargeted to the host, which describes a wrapper div instead of the
+// control; the composed path starts at the real one. Its selector still stops
+// at the shadow boundary, because a CSS path cannot cross one.
+function hit(e: Event): Element | undefined {
+  const el = e.composedPath()[0];
+  if (el instanceof Element) return el;
+  return e.target instanceof Element ? e.target : undefined;
+}
+
 // --- page snapshots ----------------------------------------------------------
 // What the operator saw, kept beside what the page fetched. For a page that
 // renders its results server-side the snapshot is the only record of the
@@ -163,60 +173,70 @@ function snapshotSoon(reason: string) {
 const INTERACTIVE = 'a,button,input,select,textarea,label,[role="button"],[role="link"],[role="tab"],[onclick]';
 
 document.addEventListener('click', (e) => {
-  if ((e.target as Element)?.closest?.('[data-wfr]')) return;
-  const el = (e.target as Element)?.closest?.(INTERACTIVE) ?? (e.target as Element);
-  if (el instanceof Element) {
-    const evt: Evt = { kind: 'action', action: 'click', target: describe(el) };
-    // The element's own markup: ids, data attributes and the link as written.
-    // Form controls are left out; their values are recorded on change.
-    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) {
-      const html = scrub(el.outerHTML.replace(/\s+/g, ' '));
-      if (html) evt.html = html.slice(0, 800);
-    }
-    push(evt);
+  const target = hit(e);
+  if (!target || target.closest('[data-wfr]')) return;
+  const el = target.closest(INTERACTIVE) ?? target;
+  const evt: Evt = { kind: 'action', action: 'click', target: describe(el) };
+  // The element's own markup: ids, data attributes and the link as written.
+  // Form controls are left out; their values are recorded on change.
+  if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) {
+    const html = scrub(el.outerHTML.replace(/\s+/g, ' '));
+    if (html) evt.html = html.slice(0, 800);
   }
+  push(evt);
   snapshotSoon('change');
 }, { capture: true, passive: true });
 
 // Marking: highlighting text while recording offers a chip; clicking it records
 // the selection as wanted data. Marks drive the result columns downstream.
+const CHIP_CSS =
+  'position:fixed;z-index:2147483647;font:12px/1 system-ui,sans-serif;font-weight:600;' +
+  'color:#fff;border:none;border-radius:6px;padding:7px 12px;cursor:pointer;' +
+  'box-shadow:0 2px 8px rgb(0 0 0/.25);';
+
 let chip: HTMLButtonElement | undefined;
+let marking: { text: string; anchor: Element | null } | undefined;
 
 function removeChip() {
   chip?.remove();
   chip = undefined;
 }
 
+function buildChip(): HTMLButtonElement {
+  const el = document.createElement('button');
+  el.dataset.wfr = 'chip';
+  el.style.cssText = CHIP_CSS;
+  el.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!marking) return;
+    push({ kind: 'action', action: 'mark', text: scrub(marking.text)?.slice(0, 4000), target: marking.anchor ? describe(marking.anchor) : undefined });
+    el.textContent = 'Marked ✓';
+    el.style.background = '#1B8A5A';
+    setTimeout(removeChip, 700);
+  });
+  return el;
+}
+
 function offerMark() {
-  removeChip();
   const sel = window.getSelection();
   const text = sel?.toString().replace(/\s+/g, ' ').trim();
-  if (!on || !sel || sel.isCollapsed || !text || text.length < 2) return;
+  if (!on || !sel || sel.isCollapsed || !text || text.length < 2) { removeChip(); return; }
   const range = sel.getRangeAt(0);
   const rect = range.getBoundingClientRect();
   // The common ancestor, not the anchor: a drag across several paragraphs
   // marks their container, whose selector generalises across pages far better
   // than "the 11th paragraph".
   const node = range.commonAncestorContainer;
-  const anchor = node instanceof Element ? node : node.parentElement;
-  chip = document.createElement('button');
-  chip.dataset.wfr = 'chip';
-  chip.textContent = 'Mark data';
-  chip.style.cssText =
-    'position:fixed;z-index:2147483647;font:12px/1 system-ui,sans-serif;font-weight:600;' +
-    'background:#2563EB;color:#fff;border:none;border-radius:6px;padding:7px 12px;cursor:pointer;' +
-    'box-shadow:0 2px 8px rgb(0 0 0/.25);';
-  chip.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 120))}px`;
-  chip.style.top = `${Math.min(rect.bottom + 8, window.innerHeight - 44)}px`;
-  chip.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    push({ kind: 'action', action: 'mark', text: scrub(text)?.slice(0, 4000), target: anchor ? describe(anchor) : undefined });
-    chip!.textContent = 'Marked ✓';
-    chip!.style.background = '#1B8A5A';
-    setTimeout(removeChip, 700);
-  });
-  document.body.appendChild(chip);
+  marking = { text, anchor: node instanceof Element ? node : node.parentElement };
+  // Moved, never rebuilt: a chip torn down and re-created on every mouseup and
+  // scroll can be gone by the time the operator's click reaches it.
+  const el = chip ?? (chip = buildChip());
+  el.textContent = 'Mark data';
+  el.style.background = '#2563EB';
+  el.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 120))}px`;
+  el.style.top = `${Math.min(rect.bottom + 8, window.innerHeight - 44)}px`;
+  if (!el.isConnected) document.body.appendChild(el);
 }
 
 document.addEventListener('mouseup', (e) => {
@@ -225,33 +245,101 @@ document.addEventListener('mouseup', (e) => {
   setTimeout(offerMark, 0);
 }, { capture: true, passive: true });
 
-window.addEventListener('scroll', removeChip, { passive: true });
+// The chip is fixed to the viewport, so a scroll leaves it pointing at the
+// wrong place: follow the selection instead of vanishing. The browser scrolls
+// an element into view before clicking it, and a chip that removed itself
+// there could never be clicked at all.
+window.addEventListener('scroll', () => { if (chip) offerMark(); }, { passive: true });
 
-document.addEventListener('change', (e) => {
-  const el = e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
-  if (!(el instanceof Element)) return;
+// A typed value the page never reports: a contenteditable box and a custom
+// combobox fire no change event at all, and some frameworks swallow it. The
+// value is read once typing pauses, in the same shape the analyser correlates
+// on, and the change event below dedupes against it, so a field yields one
+// event per final value whichever of the two fires.
+const TYPING_PAUSE = 800;
+const TEXT_TYPE = /^(text|search|email|url|tel|number)$/;
+const TEXT_ROLE = /^(textbox|combobox|searchbox)$/;
+
+const pending = new Map<Element, number>();
+const typed = new WeakMap<Element, string | undefined>();
+
+function textLike(el: Element): boolean {
+  if (el instanceof HTMLTextAreaElement) return true;
+  if (el instanceof HTMLInputElement) return TEXT_TYPE.test(el.type);
+  return (el as HTMLElement).isContentEditable || TEXT_ROLE.test(el.getAttribute('role') ?? '');
+}
+
+function typedValue(el: Element): string | undefined {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value;
+  return (el as HTMLElement).innerText?.replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
+function fresh(el: Element, value: string | undefined): boolean {
+  if (typed.get(el) === value) return false;
+  typed.set(el, value);
+  return true;
+}
+
+function clearPending(el: Element) {
+  const timer = pending.get(el);
+  if (timer !== undefined) { clearTimeout(timer); pending.delete(el); }
+}
+
+function recordTyped(el: Element) {
+  pending.delete(el);
+  const value = scrub(typedValue(el));
+  if (!value || !fresh(el, value)) return;
+  push({ kind: 'action', action: 'input', value, target: describe(el) });
+}
+
+// Enter, submit and stop commit whatever is half-recorded: the value belongs
+// in the trace before the request it drove, not after it or nowhere.
+function flushTyped() {
+  for (const el of [...pending.keys()]) { clearPending(el); recordTyped(el); }
+}
+
+function inputEvent(el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): Evt | undefined {
   const evt: Evt = { kind: 'action', action: 'input', target: describe(el) };
   if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) {
     evt.checked = el.checked;
-  } else if (el instanceof HTMLInputElement && el.type === 'password') {
+    return evt;
+  }
+  if (el instanceof HTMLInputElement && el.type === 'password') {
     secrets.add(el.value);
     evt.value = '[REDACTED]';
-  } else {
-    evt.value = scrub(el.value);
-    // The option's visible text is what the operator chose; the value is
-    // often an opaque code.
-    if (el instanceof HTMLSelectElement) {
-      const label = el.selectedOptions[0]?.text?.trim();
-      if (label) evt.label = label.slice(0, 120);
-    }
+    return evt;
   }
-  push(evt);
+  const value = scrub(el.value);
+  if (!fresh(el, value)) return undefined;
+  evt.value = value;
+  // The option's visible text is what the operator chose; the value is
+  // often an opaque code.
+  if (el instanceof HTMLSelectElement) {
+    const label = el.selectedOptions[0]?.text?.trim();
+    if (label) evt.label = label.slice(0, 120);
+  }
+  return evt;
+}
+
+document.addEventListener('change', (e) => {
+  const el = hit(e) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | undefined;
+  if (!(el instanceof Element)) return;
+  clearPending(el);
+  const evt = inputEvent(el);
+  if (evt) push(evt);
   snapshotSoon('change');
 }, { capture: true, passive: true });
 
 document.addEventListener('input', (e) => {
-  const el = e.target as HTMLInputElement;
-  if (el instanceof HTMLInputElement && el.type === 'password' && el.value) secrets.add(el.value);
+  const el = hit(e);
+  if (!el) return;
+  if (el instanceof HTMLInputElement && el.type === 'password') {
+    if (el.value) secrets.add(el.value);
+    return;
+  }
+  if (!textLike(el)) return;
+  clearPending(el);
+  pending.set(el, window.setTimeout(() => recordTyped(el), TYPING_PAUSE));
 }, { capture: true, passive: true });
 
 // A form that navigates (a classic POST) never crosses the network tap and
@@ -288,14 +376,28 @@ function describeForm(form: HTMLFormElement): Evt {
 }
 
 document.addEventListener('submit', (e) => {
+  flushTyped();
   const form = e.target as Element;
   if (form instanceof HTMLFormElement) push({ kind: 'action', action: 'submit', target: describe(form), form: describeForm(form) });
   else if (form instanceof Element) push({ kind: 'action', action: 'submit', target: describe(form) });
   snapshotSoon('change');
 }, { capture: true, passive: true });
 
+// form.submit() from script fires no submit event, so the MAIN-world tap names
+// the form and it is described here exactly as a real submit is. The tap never
+// dispatches a synthetic event: the page's own listeners must not run twice.
+window.addEventListener('message', (e: MessageEvent) => {
+  if (e.source !== window || e.data?.__wfr !== 'submit') return;
+  const form = document.forms[e.data.index as number];
+  if (!(form instanceof HTMLFormElement)) return;
+  flushTyped();
+  push({ kind: 'action', action: 'submit', target: describe(form), form: describeForm(form) });
+  snapshotSoon('change');
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
+  flushTyped();
   const el = e.target as Element;
   push({ kind: 'action', action: 'enter', target: el instanceof Element ? describe(el) : undefined });
   snapshotSoon('change');
@@ -341,7 +443,7 @@ function pageEvent() {
 function setState(next: { on: boolean; hosts: string[] }) {
   const was = on;
   // The final state of the page is the recording's last word on the outcome.
-  if (was && !next.on) takeSnapshot('stop');
+  if (was && !next.on) { flushTyped(); takeSnapshot('stop'); }
   on = next.on;
   hosts = next.hosts ?? [];
   window.postMessage({ __wfr: 'state', on, hosts }, '*');
@@ -359,7 +461,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'set-state') setState(msg);
 });
 
-window.addEventListener('pagehide', () => { takeSnapshot('leave'); flush(); });
+window.addEventListener('pagehide', () => { flushTyped(); takeSnapshot('leave'); flush(); });
 
 chrome.runtime.sendMessage({ type: 'get-state' })
   .then((state) => { if (state?.on) setState(state); })

@@ -509,6 +509,49 @@ try {
   const noisyPage = await fetch(`${BACKEND}/session/noisy`);
   check('its session page still renders',
     noisyPage.status === 200 && (await noisyPage.text()).includes('Timeline'), String(noisyPage.status));
+  // --- snapshot cap: a chatty page must not fill a session with 600 KB page
+  // states, and what the cap dropped is counted, never silent ----------------
+
+  const snap = (seq, reason) => ({
+    kind: 'snapshot', reason, url: `${MOCK}/`, title: 'Mock',
+    text: `state ${seq} of the page`, html: `<p>state ${seq}</p>`, seq,
+  });
+  await api('/api/sessions', { session: 'snaps', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/snaps/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    snap(2, 'load'),
+    ...Array.from({ length: 45 }, (_, i) => snap(3 + i, 'change')),
+    snap(48, 'stop'),
+    { kind: 'session_stop', seq: 49 },
+  ]});
+  const snapped = (await fetch(`${BACKEND}/api/sessions/snaps/export`).then((r) => r.json()));
+  const kept = snapped.events.filter((e) => e.kind === 'snapshot');
+  // Forty against the cap (the load and 39 changes), plus the stop state,
+  // which is never dropped: nothing else records how the page ended.
+  check('snapshot cap keeps 40 and the final state', kept.length === 41, `kept=${kept.length}`);
+  check('snapshot cap keeps the states nothing else records',
+    kept[0].reason === 'load' && kept.at(-1).reason === 'stop',
+    JSON.stringify([kept[0]?.reason, kept.at(-1)?.reason]));
+  check('what the cap dropped is counted', snapped.meta.snapshotsDropped === 6, `dropped=${snapped.meta.snapshotsDropped}`);
+  check('the sanitiser drop count is untouched by the cap', snapped.meta.dropped === 0, `dropped=${snapped.meta.dropped}`);
+  const snapHtml = await fetch(`${BACKEND}/session/snaps`).then((r) => r.text());
+  check('the session page says how many snapshots were dropped', snapHtml.includes('6 snapshots dropped'));
+
+  // A session under the cap carries no count and no chip.
+  await api('/api/sessions', { session: 'snapfew', hosts: ['127.0.0.1'], startedAt: 1 });
+  await api('/api/sessions/snapfew/events', { items: [
+    { kind: 'session_start', seq: 0 },
+    { kind: 'page', url: `${MOCK}/`, lang: 'en', seq: 1 },
+    snap(2, 'load'), snap(3, 'change'), snap(4, 'stop'),
+    { kind: 'session_stop', seq: 5 },
+  ]});
+  const few = await fetch(`${BACKEND}/api/sessions/snapfew/export`).then((r) => r.json());
+  check('a session under the cap keeps every snapshot',
+    few.events.filter((e) => e.kind === 'snapshot').length === 3 && few.meta.snapshotsDropped === undefined,
+    JSON.stringify(few.meta.snapshotsDropped));
+  const fewHtml = await fetch(`${BACKEND}/session/snapfew`).then((r) => r.text());
+  check('a session under the cap shows no chip', !fewHtml.includes('snapshots dropped'));
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {
