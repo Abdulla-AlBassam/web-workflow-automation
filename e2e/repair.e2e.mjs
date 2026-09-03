@@ -462,8 +462,10 @@ try {
     stopLines.some((l) => l.kind === 'info' && /Spend this repair/.test(l.text)) &&
     !existsSync(join(dataDir, 'stopme', 'spec.json')), JSON.stringify(stopLines.slice(-3)));
   const stopPage = await fetch(`${BACKEND}/session/stopme`).then((r) => r.text());
-  check('session page carries the Stop control', stopPage.includes("stop.textContent = 'Stop'") && stopPage.includes('/repair/stop'));
-  check('session page scripts parse (stop control)', scriptsCompile(stopPage) === '', scriptsCompile(stopPage));
+  // The loop is reachable by API only since 3 Sept: the page carries no
+  // Adjust control, no stream reader and no call to the repair routes.
+  check('session page carries no Adjust control or repair stream', !stopPage.includes('fix-btn') && !stopPage.includes('/repair') && !stopPage.includes('streamRepair'));
+  check('session page scripts parse (no repair console)', scriptsCompile(stopPage) === '', scriptsCompile(stopPage));
 
   // Scenario 9: a model that never stops investigating hits the budget.
   await record('loop', jsonpEvents());

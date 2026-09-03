@@ -17,6 +17,7 @@ We write vanilla HTML/CSS (no component library, the surfaces are small). beauti
 
 - Collapsed-by-default context (`details.fold`): chevron, section icon, title, status chips right-aligned. Content is progressive disclosure; nothing informational stays expanded by default.
 - "i" pills hold fixed explainers; "?" pills hold run-dependent clarifications (amber ring when present). Both are click-toggled popovers, fixed-positioned and viewport-clamped, closed on scroll or Escape.
+- The Automation card's "i" (and the refusal card's) says in plain English what the tool builds on its own, with examples, and sends anything more to Maximum Effort Mode. Its chips say what the automation actually does: a deterministic spec shows its step count and "direct requests" or "N browser steps"; a session script shows "opens a browser" or "direct requests" read from its source, its provenance and robots.txt. A script's summary lives in the provenance note, never in the "?".
 - Loading: 3x3 pixel-grid loader (`pixel-on` 650ms, chevron wavefront delays) + shimmer label + elapsed timer. No rotating spinners anywhere.
 - Status dots: green complete, red interrupted, pulsing red recording. The word sits next to the dot; motion is never the only channel.
 
@@ -32,7 +33,7 @@ We write vanilla HTML/CSS (no component library, the surfaces are small). beauti
 
 ## Rules
 
-- Everything appears only when it is needed: warnings only when warranted, Adjust only after a run, Bulk only for single-parameter specs, dropped-events chip only when non-zero.
+- Everything appears only when it is needed: warnings only when warranted, Bulk only for single-parameter specs, dropped-events chip only when non-zero.
 - Every control defines hover, active, focus-visible, and disabled. Press feedback: `scale(0.96)`, exactly.
 - Transitions <=200ms on named properties; ease `cubic-bezier(.23,1,.32,1)`. No entrance animations on the popup.
 - Focus: 2px white-alpha `focus-visible` ring. Hit areas >= 34px visual.

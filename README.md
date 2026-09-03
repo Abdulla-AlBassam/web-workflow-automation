@@ -148,6 +148,11 @@ The pipeline refuses; the assistant can recover:
   each visited page still carries the results the operator saw, so the
   script parses that HTML with `ctx.dom` and opens a browser page only
   where nothing else reaches the data. Live: UK Companies House.
+- A site that walls a plain fetch and a cold deep link but serves its own
+  search form. The script opens the home page, searches from the form and
+  applies the filters and the sort to the results URL in the same browser
+  context. Live: eBay, newly listed items above a minimum price, 60 rows
+  headless.
 - Nothing typed but something marked. The assistant derives a
   zero-parameter automation from the marks. Suite only.
 - Values transformed before sending (a date as an epoch, a choice as an
@@ -294,10 +299,10 @@ The API loop is still in the code (`backend/src/effort.ts`, routes
 `/effort`, `/effort/say`, `/effort/stop`) and covered by its suite, but
 nothing on the page calls it: at frontier prices a single run cost dollars,
 and the brief gives the same model the same evidence for nothing. The older
-assistant, Adjust, is still there for one job: after a run of a
-deterministic automation, a note ("only the name and the city") narrows the
-fields or rewrites the script, verified the same way. `ANTHROPIC_API_KEY`
-in `.env` is needed for Adjust only.
+assistant, Adjust (`backend/src/repair.ts`, route `/repair`), is out of
+the page for the same reason: a small change to an automation ("only the
+name and the city") is a new goal on the brief. Its code and its suite
+remain. Nothing in the app needs an API key.
 
 ## Safeguards
 
@@ -341,7 +346,7 @@ npm run e2e                # record to replay in real Chromium (stop the backend
 npm run test:failures      # every named stop, the script sandbox, robots.txt and .env
 npm run test:enhancements  # pagination in body and URL, bulk, chains, marks, snapshot cap
 npm run test:matrix        # eleven site shapes recorded end to end in real Chromium
-npm run test:repair        # adjust loop against a scripted mock model
+npm run test:repair        # repair loop (dormant) against a scripted mock model
 npm run test:effort        # Maximum Effort Mode, the brief and its budget, verdicts and refusals
 npm run typecheck
 ```

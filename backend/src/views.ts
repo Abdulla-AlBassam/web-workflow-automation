@@ -171,16 +171,6 @@ textarea:disabled, input:disabled { opacity:.45; }
 /* ---- run results ---- */
 .run-steps { list-style:none; margin-top:12px; display:flex; flex-direction:column; gap:4px; font-size:12px; padding:0; }
 .run-steps .g-ok { color:var(--green); } .run-steps .g-fail { color:var(--red); }
-.fix-block { margin-top:14px; padding-top:12px; border-top:1px solid var(--line); }
-.repair-console { background:var(--console); color:#e6edf3; border-radius:8px; padding:12px 14px; margin-top:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; line-height:1.7; max-height:380px; overflow:auto; box-shadow:var(--ring); }
-.repair-console div { white-space:pre-wrap; word-break:break-word; }
-.rc-stop { margin-top:12px; }
-.rc-info, .rc-done { color:#8a93a6; }
-.rc-llm { color:#9ec1ff; }
-.rc-try { color:#e6edf3; }
-.rc-fail, .rc-error { color:#ff8a8a; }
-.rc-ok, .rc-saved { color:#6bd49a; }
-.rc-advice { color:#f2ce72; }
 
 /* ---- conversation ---- */
 .chat { margin-top:10px; display:flex; flex-direction:column; gap:8px; max-height:520px; overflow:auto; padding:12px; background:var(--inset); border-radius:8px; }
@@ -235,6 +225,14 @@ const LOGO = '<svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true"
 function pill(kind: 'i' | 'q', body: string, label: string, live = false): string {
   return `<span class="pw"><button type="button" class="pill pill-${kind}${live ? ' pill-live' : ''}" aria-label="${esc(label)}">${kind === 'i' ? 'i' : '?'}</button><div class="pop" hidden>${body}</div></span>`;
 }
+
+// What the deterministic pipeline builds without any model, in the words an
+// operator needs before pressing Run: the one shape it covers, examples, the
+// two conditions, and where everything else goes.
+const ABOUT_OFF_THE_BAT = '<p><b>On its own</b>, this tool automates one shape of workflow: you type a value into a search box, the page asks its server, and the results come back as data. It finds that request and calls it directly with any new value, so a run is one call returning rows.</p>'
+  + '<p><b>Examples.</b> Sijilat: type a company name, get the matching registrations with the fields you marked. A name search that opens a detail page: the search call, then that page read for the marked fields. A paged list: every page fetched. A form with several boxes: one parameter each.</p>'
+  + '<p><b>It needs</b> the value you typed to appear unchanged in a request, and the results to come back as data rather than drawn into the page.</p>'
+  + '<p><b>Anything more</b>, a filter, a sort, a price bound, results drawn into the page, a site that refuses plain requests: use <b>Maximum Effort Mode</b> below. It hands the whole recording to a model you already use and verifies the answer against what you saw before saving it.</p>';
 
 function dot(st: string): string {
   return `<span class="dot dot-${esc(st)}" title="${esc(st)}"></span>`;
@@ -368,7 +366,7 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
   </tr>`).join('');
 
   const specCards = spec ? renderSpec(spec, meta.session, a.marks.length, script, st === 'complete') : `<div class="card">
-    <div class="card-head"><h2>Automation</h2></div>
+    <div class="card-head"><h2>Automation</h2>${pill('i', ABOUT_OFF_THE_BAT, 'What this tool builds on its own')}</div>
     <p class="note" style="margin-top:10px">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p>
     ${st === 'complete' ? `<p class="sub" style="margin-top:10px">The deterministic analyser found no direct call to promote. <a href="#effort">Maximum Effort Mode</a> below reads the pages you saw and works out how to reach the result you want.</p>` : ''}
   </div>`;
@@ -376,71 +374,6 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
 
   return shell(`${meta.name ?? meta.session}`, sidebar(sessions, host, meta.session), `
     <script>
-    // LLM adjust: stream the loop's NDJSON lines into a visible console so
-    // the operator watches every diagnosis, proposal, and verification.
-    window.streamRepair = async (id, con, after, body) => {
-      con.hidden = false;
-      con.innerHTML = '';
-      after.innerHTML = '';
-      // Stop asks the backend to abort this session's loop; the stream stays
-      // open so the closing lines (what was kept, the spend) still arrive.
-      const stop = document.createElement('button');
-      stop.className = 'btn btn-quiet rc-stop';
-      stop.textContent = 'Stop';
-      stop.addEventListener('click', async () => {
-        stop.disabled = true;
-        stop.textContent = 'Stopping…';
-        await fetch('/api/sessions/' + encodeURIComponent(id) + '/repair/stop', { method: 'POST' }).catch(() => {});
-      });
-      con.before(stop);
-      const GLYPH = { info: '· ', llm: '∴ ', tool: '⚙ ', try: '→ ', fail: '✗ ', ok: '✓ ', saved: '✓ ', advice: '☞ ', error: '✗ ', done: '· ' };
-      const line = (kind, text) => {
-        const d = document.createElement('div');
-        d.className = 'rc-' + kind;
-        d.textContent = (GLYPH[kind] ?? '') + text;
-        con.append(d);
-        con.scrollTop = con.scrollHeight;
-      };
-      let savedOk = false;
-      try {
-        const r = await fetch('/api/sessions/' + encodeURIComponent(id) + '/repair', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body ?? {}),
-        });
-        const reader = r.body.getReader();
-        const dec = new TextDecoder();
-        let buf = '';
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          let i;
-          while ((i = buf.indexOf('\\n')) >= 0) {
-            const l = buf.slice(0, i).trim();
-            buf = buf.slice(i + 1);
-            if (!l) continue;
-            const e = JSON.parse(l);
-            line(e.kind, e.text);
-            if (e.kind === 'saved') savedOk = true;
-          }
-        }
-      } catch (e) {
-        line('error', 'stream lost: ' + e.message);
-      }
-      stop.remove();
-      if (savedOk) {
-        const view = document.createElement('button');
-        view.className = 'btn';
-        view.style.marginTop = '10px';
-        view.textContent = 'View & run the automation';
-        // Without the hash: an operator who arrived at #effort would otherwise
-        // reload straight back into the fold, past the automation just saved.
-        view.addEventListener('click', () => location.assign(location.pathname));
-        after.append(view);
-      }
-      return savedOk;
-    };
     // The signature loading state: pixel grid, shimmer label, elapsed timer.
     window.loaderHtml = (label) => {
       const delays = [90, 180, 270, 0, 90, 180, 90, 180, 270];
@@ -544,13 +477,6 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
           if (e.key === 'Escape') location.reload();
         });
       });
-
-      const rbtn = document.getElementById('repair-btn');
-      if (rbtn) rbtn.addEventListener('click', async () => {
-        rbtn.disabled = true;
-        await streamRepair(id, document.getElementById('repair-console'), document.getElementById('repair-after'), {});
-        rbtn.disabled = false;
-      });
     })();
     </script>`);
 }
@@ -565,11 +491,18 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
     `<label>${esc(p.name)}<input id="param-${esc(p.name)}" value="${esc(p.example)}" spellcheck="false" autocomplete="off"></label>`
   ).join('');
 
-  // Collapsed-row badges: the shape of the automation at a glance.
-  const chips: string[] = [`<span class="chip num">${spec.steps.length} step${spec.steps.length === 1 ? '' : 's'}</span>`];
-  chips.push(reasoned.length
-    ? `<span class="chip">${reasoned.length} browser step${reasoned.length === 1 ? '' : 's'}</span>`
-    : '<span class="chip chip-ok">direct requests</span>');
+  // Collapsed-row badges: what the automation actually does. A deterministic
+  // spec is its steps; a session script is one step whatever happens inside
+  // it, so its badge is read from the source: does it open a browser at all?
+  const chips: string[] = [];
+  if (scriptStep) {
+    if (script !== undefined) chips.push(/\bctx\.browser\./.test(script) ? '<span class="chip">opens a browser</span>' : '<span class="chip chip-ok">direct requests</span>');
+  } else {
+    chips.push(`<span class="chip num">${spec.steps.length} step${spec.steps.length === 1 ? '' : 's'}</span>`);
+    chips.push(reasoned.length
+      ? `<span class="chip">${reasoned.length} browser step${reasoned.length === 1 ? '' : 's'}</span>`
+      : '<span class="chip chip-ok">direct requests</span>');
+  }
   if (spec.repaired) chips.push(`<span class="chip">${spec.repaired.mode === 'import' ? 'external model' : spec.repaired.mode === 'effort' ? 'maximum effort' : spec.repaired.mode === 'refine' ? 'LLM refined' : 'LLM built'}</span>`);
   if (scriptStep?.robots?.length) chips.push('<span class="chip chip-warn">robots.txt</span>');
   // A script's rows were checked against the marks when it was accepted;
@@ -578,9 +511,10 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
   if (marksCount && !unmatched) chips.push('<span class="chip chip-warn">marks unmatched</span>');
   else if (marksCount && unmatched < marksCount) chips.push(`<span class="chip chip-warn num">${unmatched}/${marksCount} marks</span>`);
 
-  // "?": clarifications this particular automation generated.
+  // "?": clarifications this particular automation generated. A script's
+  // reason is its summary, already in the provenance note.
   const clarifications: string[] = [];
-  for (const s of reasoned) clarifications.push(`<p>${esc(s.reason)}</p>`);
+  for (const s of reasoned) if (s.type !== 'script') clarifications.push(`<p>${esc(s.reason)}</p>`);
   for (const r of scriptStep?.robots ?? []) clarifications.push(`<p>${esc(r)}</p>`);
   if (marksCount && !unmatched) clarifications.push('<p>Your marked text was not found in any captured API response (it may be rendered server-side), so results show all fields instead.</p>');
   if (marksCount && unmatched && unmatched < marksCount) clarifications.push(`<p>Only ${unmatched} of ${marksCount} marked selections could be located; the rest were not found where the outcome lives.</p>`);
@@ -597,7 +531,7 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
       : '';
 
   return `<details class="fold">
-    <summary>${CHEV}${IC_BOLT}<span>Automation</span><span class="badges">${chips.join('')}${qPill}</span></summary>
+    <summary>${CHEV}${IC_BOLT}<span>Automation</span><span class="badges">${chips.join('')}${pill('i', ABOUT_OFF_THE_BAT, 'What this tool builds on its own')}${qPill}</span></summary>
     <div class="fold-body">
     ${provenance}
     ${scriptStep
@@ -627,14 +561,6 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
       <div class="runrow">${inputs}<button id="run-btn" class="btn">${PLAY}Run</button></div>
       <div id="run-out"></div>
       ${hasEffort ? `<div id="to-effort-row" style="margin-top:10px" hidden><button id="to-effort" class="btn btn-quiet">Not what I wanted?</button></div>` : ''}
-      <div id="fix-block" class="fix-block" hidden>
-        <div class="card-head"><h2 style="font-size:12px">Adjust</h2>
-        ${pill('i', '<p>Not what you wanted? For a small adjustment (fewer fields, a missing column) describe it here; the assistant changes the automation and verifies it against your recording before anything is saved.</p><p>For anything bigger, use <b>Maximum Effort Mode</b> below.</p>', 'About adjusting the automation')}</div>
-        <textarea id="fix-text" rows="2" style="margin-top:8px" placeholder="e.g. I only want the article text, not the other fields"></textarea>
-        <div class="runrow" style="margin-top:8px"><button id="fix-btn" class="btn btn-quiet">Adjust</button></div>
-        <div id="fix-console" class="repair-console" hidden></div>
-        <div id="fix-after"></div>
-      </div>
     </div>
     ${spec.parameters.length === 1 ? `<div id="pane-bulk" style="margin-top:12px" hidden>
       <textarea id="bulk-values" rows="4" placeholder="value one&#10;value two&#10;value three"></textarea>
@@ -789,7 +715,6 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
     // wrong thing; that verdict is only possible once a result is on screen.
     const toEffort = document.getElementById('to-effort-row');
     if (toEffort) toEffort.querySelector('button').addEventListener('click', () => openEffort());
-    let lastRun;
     btn.addEventListener('click', async () => {
       btn.disabled = true;
       const stopTimer = showLoading(out, 'Running the automation');
@@ -798,30 +723,12 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
         const res = await runOnce(values);
         stopTimer();
         renderResult(res, out, 'run-' + Object.values(values)[0]);
-        // What the operator received, as the table shows it, for the assistant
-        // to compare with the marked selections.
-        const rows = res.ok ? (res.extracted?.records?.rows ?? []) : [];
-        const first = rows.length ? flat(rows[0]) : undefined;
-        lastRun = {
-          params: values, ok: res.ok, stoppedReason: res.stoppedReason, rowCount: rows.length,
-          columns: first ? Object.keys(first) : [],
-          firstRow: first && Object.fromEntries(Object.entries(first).map(([k, v]) => [k, String(v ?? '').slice(0, 120)])),
-        };
-        document.getElementById('fix-block').hidden = false;
         if (toEffort) toEffort.hidden = false;
       } catch (e) {
         stopTimer();
         out.innerHTML = '<p class="fail-note">✗ Could not reach the local backend: ' + esc(e.message) + '</p>';
       }
       btn.disabled = false;
-    });
-
-    const fixBtn = document.getElementById('fix-btn');
-    fixBtn.addEventListener('click', async () => {
-      fixBtn.disabled = true;
-      await streamRepair(${JSON.stringify(session)}, document.getElementById('fix-console'), document.getElementById('fix-after'),
-        { feedback: document.getElementById('fix-text').value.trim(), lastRun });
-      fixBtn.disabled = false;
     });
 
     const bulkBtn = document.getElementById('bulk-btn');
@@ -878,7 +785,7 @@ function renderEffort(meta: Meta, log: Record<string, unknown>[], hasSpec: boole
   const entries = log.filter((l) => l.kind !== 'block' && l.kind !== 'llm' && l.kind !== 'start').length;
   const historyLabel = msgCount ? `Past conversation · ${msgCount} message${msgCount === 1 ? '' : 's'}` : `History · ${entries} entr${entries === 1 ? 'y' : 'ies'}`;
   return `<details class="fold" id="effort"${hasSpec ? '' : ' open'}>
-    <summary>${CHEV}${IC_SPARK}<span>Maximum Effort Mode</span><span class="badges"><span class="chip">bring your own model</span>${pill('i', '<p>Hand the whole recording to a model you already pay for.</p><p><b>1.</b> State the goal: what should this automation return?</p><p><b>2.</b> Export the brief: one file carrying your goal, the rules and every page and call from the recording.</p><p><b>3.</b> Give it to Claude, Codex or any capable model, then paste its answer back here to be verified and saved.</p><p>Nothing is saved until the answer has been run against your recording and returned what you saw.</p>', 'About Maximum Effort Mode')}</span></summary>
+    <summary>${CHEV}${IC_SPARK}<span>Maximum Effort Mode</span><span class="badges">${pill('i', '<p>Hand the whole recording to a model you already pay for.</p><p><b>1.</b> State the goal: what should this automation return?</p><p><b>2.</b> Export the brief: one file carrying your goal, the rules and every page and call from the recording.</p><p><b>3.</b> Give it to Claude, Codex or any capable model, then paste its answer back here to be verified and saved.</p><p>Nothing is saved until the answer has been run against your recording and returned what you saw.</p>', 'About Maximum Effort Mode')}</span></summary>
     <div class="fold-body">
     <label class="lbl" for="effort-goal" style="margin-top:0">Goal</label>
     <textarea id="effort-goal" rows="3" placeholder="What should this automation return? e.g. the top 5 listings on the final page, with the title, price and a link to each">${esc(meta.goal ?? '')}</textarea>
