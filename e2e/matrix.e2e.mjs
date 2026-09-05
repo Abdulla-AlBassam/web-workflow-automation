@@ -262,9 +262,9 @@ try {
       e.target?.tag === 'button' && e.target?.id === 'sd_go' && e.target?.text === 'Search'),
     JSON.stringify(sdEvents.filter((e) => e.action === 'click').map((e) => e.target)));
   const sdRun = await api('/api/sessions/mx-shadow/run', { params: { sd_name: 'smith' } });
-  check('shadow root: the recording generates and replays',
-    sdRun.ok && sdRun.extracted?.records?.rows?.[0]?.name === 'Smith + Jones Ltd',
-    sdRun.stoppedReason ?? JSON.stringify(sdRun.extracted?.records?.rows));
+  check('shadow root: results absent from snapshots are refused with a reason',
+    sdRun.error === 'no spec for this session' &&
+    (await fetch(`${BACKEND}/session/mx-shadow`).then((r) => r.text())).includes('None of its rows carries anything you saw on the page.'));
 
   // 11. form.submit() from script fires no submit event: the tap names the
   // form and the recorder describes it exactly as a real submit is described.
@@ -315,6 +315,23 @@ try {
   check('autosuggest: replay with a new value and a lower bound returns rows',
     sgRun.ok && sgRun.extracted?.records?.count === 2,
     sgRun.stoppedReason ?? JSON.stringify(sgRun.extracted?.records));
+
+  // --- chunk 3: deterministic evidence gate -------------------------------
+  await record('/echo/', 'mx-echo', (p) => search(p, 'widget'));
+  const refusedPage = await context.newPage();
+  await refusedPage.goto(`${BACKEND}/session/mx-echo`);
+  check('echo: the page names the refused call and the missing evidence',
+    (await refusedPage.locator('body').innerText()).includes('/echo/api?q=widget') &&
+    (await refusedPage.locator('body').innerText()).includes('Nothing was built.'));
+  check('echo: a refusal has no Run control and opens Maximum Effort',
+    await refusedPage.locator('#run-btn').count() === 0 &&
+    await refusedPage.locator('#effort').evaluate((e) => e.open));
+  const refusedRun = await api('/api/sessions/mx-echo/run', { params: { query: 'other' } });
+  check('echo: a refused session cannot run through the API', refusedRun.error === 'no spec for this session');
+  await refusedPage.goto(`${BACKEND}/session/mx-algolia`);
+  check('verified: the session page shows the green evidence chip',
+    await refusedPage.locator('.chip-ok', { hasText: 'matches what you saw' }).count() === 1);
+  await refusedPage.close();
 } catch (err) {
   check('harness ran to completion', false, String(err?.stack ?? err).slice(0, 400));
 } finally {

@@ -8,6 +8,7 @@ export type Meta = {
   goal?: string;
   // When a brief was last exported for an external model.
   briefAt?: number;
+  refusal?: { reason: string; at: number; version: number };
   hosts: string[];
   startedAt: number;
   stoppedAt?: number;
@@ -60,6 +61,10 @@ export function deleteScript(session: string, file: string) {
 
 export function saveSpec(session: string, spec: unknown) {
   writeFileSync(specPath(session), JSON.stringify(spec, null, 2));
+}
+
+export function deleteSpec(session: string) {
+  if (existsSync(specPath(session))) unlinkSync(specPath(session));
 }
 
 export function getSpec(session: string): unknown | undefined {

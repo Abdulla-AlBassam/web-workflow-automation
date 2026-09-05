@@ -7,6 +7,9 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { analyse } from '../backend/src/analyse.ts';
 import { SPEC_VERSION, paramName, toSpec } from '../backend/src/generate.ts';
+import { verifySpec, splitMarks } from '../backend/src/candidate.ts';
+import { markKey } from '../backend/src/analyse.ts';
+import { paramNames, evidenceStrings } from '../backend/src/llm-tools.ts';
 import { run } from '../runner/src/run.ts';
 import { lintScript, runScript } from '../runner/src/script.ts';
 import { sanitise } from '../backend/src/redact.ts';
@@ -505,6 +508,49 @@ try {
     check(`paramName: ${field.slice(0, 12)} ${label ? `+ "${label}"` : 'with no label'} → ${want}`,
       paramName(field, label) === want, paramName(field, label));
   }
+
+  // --- chunk 3: deterministic evidence gate -------------------------------
+  const evidence = (trace) => {
+    const a = analyse(trace);
+    const snapshots = trace.events.filter((e) => e.kind === 'snapshot');
+    return { a, events: trace.events, typed: paramNames(a), ...splitMarks(trace.events, a),
+      headerMarks: splitMarks(trace.events, a).headers, snapshots,
+      clicked: evidenceStrings(trace.events, a),
+      textHay: snapshots.map((e) => markKey(e.text ?? '')).join(' ') };
+  };
+  const echoTrace = structuredClone(baseTrace);
+  echoTrace.events[3].resBody = JSON.stringify({ TOTAL: 1, RECORDS: [{ id: 'aux-12345', image: 'https://images.test/item.jpg' }] });
+  echoTrace.events.splice(-1, 0, { kind: 'snapshot', seq: 4, text: '139867 Awal Trading Co. W.L.L 250 BHD', html: '<img src="https://images.test/item.jpg">' });
+  const echoSpec = toSpec(analyse(echoTrace), { name: 'echo', origin: MOCK, loadUrl: MOCK, probeStatus: 200 });
+  const refusedSpec = verifySpec(echoSpec, evidence(echoTrace));
+  check('spec evidence: ids and image URLs in HTML do not count as visible results',
+    refusedSpec.status === 'refused' && refusedSpec.reason.includes('POST ' + MOCK), JSON.stringify(refusedSpec));
+  const metadataTrace = structuredClone(echoTrace);
+  metadataTrace.events[3].resBody = JSON.stringify({ TOTAL: 1, RECORDS: [[1, { model: { type: 'Action' } }]] });
+  metadataTrace.events.find((e) => e.kind === 'snapshot').text = 'Action figures for sale';
+  check('spec evidence: nested application metadata is not a visible row field', verifySpec(echoSpec, evidence(metadataTrace)).status === 'refused');
+  const markedTrace = structuredClone(echoTrace);
+  markedTrace.events.splice(-1, 0, { kind: 'action', action: 'mark', text: 'aux-12345', seq: 5 });
+  check('spec evidence: marked row values verify the response', verifySpec(echoSpec, evidence(markedTrace)).status === 'verified');
+  markedTrace.events.splice(-1, 0, { kind: 'action', action: 'mark', text: 'missing title', seq: 6 });
+  check('spec evidence: every mark is required', verifySpec(echoSpec, evidence(markedTrace)).status === 'refused');
+  const noSnapshots = structuredClone(echoTrace);
+  noSnapshots.events = noSnapshots.events.filter((e) => e.kind !== 'snapshot');
+  check('spec evidence: older recordings are explicitly unverified', verifySpec(echoSpec, evidence(noSnapshots)).status === 'unverified');
+  const clickedTrace = structuredClone(noSnapshots);
+  clickedTrace.events.splice(-1, 0, { kind: 'action', action: 'click', target: { tag: 'a', text: 'aux-12345' }, seq: 5 });
+  check('spec evidence: a clicked result can verify rows without snapshots', verifySpec(echoSpec, evidence(clickedTrace)).status === 'verified');
+  const queryOnly = structuredClone(echoTrace);
+  queryOnly.events[3].resBody = JSON.stringify({ TOTAL: 1, RECORDS: [{ query: '139867' }] });
+  check('spec evidence: an echoed query alone is insufficient', verifySpec(echoSpec, evidence(queryOnly)).status === 'refused');
+  const visibleTrace = structuredClone(echoTrace);
+  visibleTrace.events[3].resBody = JSON.stringify({ TOTAL: 1, RECORDS: [{ name: 'Awal Trading Co. W.L.L' }] });
+  check('spec evidence: visible result text verifies the response', verifySpec(echoSpec, evidence(visibleTrace)).status === 'verified');
+  visibleTrace.events[3].resBody = JSON.stringify({ TOTAL: 0, RECORDS: [] });
+  check('spec evidence: a recorded empty result remains unverified', verifySpec(echoSpec, evidence(visibleTrace)).status === 'unverified');
+  const legacyTrace = JSON.parse(readFileSync('fixtures/live-trace.sijilat.json', 'utf8'));
+  const legacySpec = toSpec(analyse(legacyTrace), { name: 'legacy', origin: MOCK, loadUrl: MOCK, probeStatus: 200 });
+  check('spec evidence: the Sijilat recording remains usable without snapshots', verifySpec(legacySpec, evidence(legacyTrace)).status === 'unverified');
 } finally {
   mock.kill();
 }

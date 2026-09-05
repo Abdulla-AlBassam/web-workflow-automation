@@ -4,7 +4,8 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
 
 ```jsonc
 {
-  "version": 16,
+  "version": 18,
+  "verified": { "status": "unverified", "note": "This recording has no page snapshots or clicked results to check." },
   "name": "sijilat-cr-search",
   "origin": "https://www.sijilat.bh",
   "language": "EN",                     // recorded UI language; the runner sets it explicitly
@@ -101,3 +102,12 @@ A spec is the Generate stage's output and the Execute stage's input. It is the "
 - **Language is explicit.** The recorded UI language is pinned into the spec so a replay does not inherit the runner's default.
 - Templating is `{{name}}` substitution over the JSON body and URL, matched by value at generate time so it survives nested fields.
 - **Composite strings splice.** A value found *inside* a larger string field (a query string bundled into one JSON value, Algolia-style) is matched as a bounded token and spliced in place: `"params": "query={{enc:query}}&page=0"`. `{{enc:name}}` substitutes percent-encoded, `{{plus:name}}` fully form-encoded (spaces as `+`, everything else percent-escaped), bare `{{name}}` raw — whichever encoding the recording itself used. Form-encoded request bodies (`name=x&lang=en`) keep their raw string shape with placeholders spliced in and replay with the `application/x-www-form-urlencoded` content type. Embedded matching runs only when no exact field or URL match carried the value, and token boundaries are enforced ("art" never matches inside "smart").
+
+Deterministic specs saved by the backend carry `verified: { status, note }`.
+`verified` means every usable mark was located, or rows carry visible
+snapshot text or a clicked result beyond an echoed input. `unverified`
+means insufficient recorded evidence, an empty recorded result, or browser
+extraction without recorded response rows. This is an offline check, not a
+replay guarantee. A mismatch saves no spec; the session keeps a refusal
+reason, timestamp and generator version and retries when that version changes.
+Model-built specs remain governed by script acceptance and do not regenerate.

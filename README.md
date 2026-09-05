@@ -60,7 +60,11 @@ server-rendered pages, and `script` for a program a model wrote for one
 session. A page number in the request body or the query string, paired
 with a total in the response, turns on fetch-all pagination. Marked values
 become named columns. Specs carry a version and regenerate when the
-generator changes.
+generator changes. Before saving, the recorded response is checked against
+all marked selections, or visible snapshot text and clicked results. A
+query echoed by a response is not enough. A mismatch refuses the spec;
+recordings without enough evidence, empty searches and browser extraction
+are labelled unverified. This checks recorded evidence, not a live replay.
 
 Execute (`runner/`). The runner takes a spec and new inputs, runs the steps,
 checks the outcome against what the recording promised, and stops with a
@@ -87,7 +91,9 @@ with developer mode on.
    cells of one row; those become the columns, in that order. A header row
    is ignored. On a page of text, drag across the whole block.
 3. Stop. The session page opens with the timeline, the outcome call and
-   the generated steps.
+   the generated steps. If the direct call fails the evidence check, the
+   page explains why and opens Maximum Effort Mode instead of offering Run.
+   Green means the rows match recorded evidence; amber means unverified.
 4. Enter a new value under Run the automation. Results render as a table
    with CSV and JSON download.
 5. Bulk run takes one value per line, runs them one at a time with a delay,
@@ -139,7 +145,8 @@ on the real site.
 ## What it does not handle
 
 Two layers. The deterministic pipeline needs the typed value to appear
-unchanged in a request and the outcome to come back as structured data.
+unchanged in a request and the outcome to come back as structured data
+supported by the recording's evidence when that evidence is available.
 When it refuses, or when the workflow is more than one search (filters,
 sorts, several pages), Maximum Effort Mode hands the whole recording to a
 model that works it out and writes a script for the session. Each line

@@ -860,6 +860,34 @@ try {
   check('brief: a generated id is named by the field’s label',
     /"50" into p-0-1-2\[0\]-9-textbox \(label "Minimum price"\) → suggested parameter name `minimum_price`/.test(typedBlock),
     typedBlock);
+
+  // --- chunk 3: deterministic evidence gate -------------------------------
+  const refusedEvents = shopEvents();
+  refusedEvents.splice(-1, 0, { kind: 'net', method: 'GET', url: `${SITE}/api/echo?q=hub`,
+    status: 200, contentType: 'application/json', resBody: JSON.stringify({ rows: [{ id: 'aux-99887' }] }), seq: 13 });
+  refusedEvents.at(-1).seq = 14;
+  const refusedStop = await record('refused', refusedEvents);
+  const refusal = readMeta('refused').refusal;
+  check('spec refusal: stop saves a versioned reason and no spec',
+    refusedStop.spec === false && refusal?.version > 17 && !existsSync(join(dataDir, 'refused', 'spec.json')));
+  const refusedBrief = await fetch(`${BACKEND}/api/sessions/refused/brief?probe=0`).then((r) => r.text());
+  check('brief: a refused automation carries the gate reason',
+    refusedBrief.includes('None: refused, GET ' + SITE + '/api/echo?q=hub') && refusedBrief.includes('Nothing was built.'));
+  const stalePath = join(dataDir, 'refused', 'meta.json');
+  writeFileSync(stalePath, JSON.stringify({ ...readMeta('refused'), refusal: { ...refusal, version: 1, at: 1 } }));
+  writeFileSync(join(dataDir, 'refused', 'spec.json'), JSON.stringify({ version: 1, steps: [], parameters: [] }));
+  const stalePage = await fetch(`${BACKEND}/session/refused`).then((r) => r.text());
+  check('spec refusal: stale regeneration removes the old spec and shows the current reason immediately',
+    !existsSync(join(dataDir, 'refused', 'spec.json')) && readMeta('refused').refusal?.version === refusal.version && stalePage.includes('Nothing was built.'));
+  const retryAt = readMeta('refused').refusal.at;
+  await fetch(`${BACKEND}/session/refused`);
+  check('spec refusal: page reload does not retry the same generator version', readMeta('refused').refusal.at === retryAt);
+  const refusalImport = await importTo('refused', answer);
+  check('spec refusal: a verified model answer clears the refusal and survives page reload',
+    refusalImport.status === 200 && !readMeta('refused').refusal &&
+    (await fetch(`${BACKEND}/session/refused`).then((r) => r.text())).includes('Built by an external model'));
+  const keptScript = await api('/api/sessions/refused/spec', {});
+  check('spec refusal: explicit generation preserves an accepted model script', keptScript.repaired?.mode === 'import');
 } catch (err) {
   check('harness ran to completion', false, String(err));
 } finally {

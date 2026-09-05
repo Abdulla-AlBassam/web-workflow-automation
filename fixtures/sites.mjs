@@ -19,9 +19,9 @@ const ROWS = [
 // Priced rows for the autosuggest site, where a numeric filter has to mean
 // something: the recorded bound keeps one row, a lower bound keeps two.
 const PRICED = [
-  { id: 'p1', name: 'Gulf Gum Trading', price: 250 },
-  { id: 'p2', name: 'Gulf Gum Wholesale', price: 120 },
-  { id: 'p3', name: 'Smith + Jones Ltd', price: 900 },
+  { id: 'p1', name: 'Gulf Gum Trading', price: 250, city: 'Manama' },
+  { id: 'p2', name: 'Gulf Gum Wholesale', price: 120, city: 'Manama' },
+  { id: 'p3', name: 'Smith + Jones Ltd', price: 900, city: 'Riffa' },
 ];
 
 const FAKE_JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJhbm9uIjp0cnVlLCJzY29wZSI6InB1YmxpYyJ9.c2lnbmF0dXJl';
@@ -282,7 +282,7 @@ document.getElementById('as_go').addEventListener('click', async () => {
   history.pushState({}, '', '/autosuggest/?' + qs);
   const r = await fetch('/autosuggest/api?' + qs);
   document.querySelector('#results tbody').innerHTML =
-    (await r.json()).rows.map((x) => '<tr><td>' + x.id + '</td><td>' + x.name + '</td><td>' + x.price + '</td></tr>').join('');
+    (await r.json()).rows.map((x) => '<tr><td>' + x.id + '</td><td>' + x.name + '</td><td>' + x.price + '</td><td>' + x.city + '</td></tr>').join('');
 });
 </script>`));
   }
@@ -292,6 +292,16 @@ document.getElementById('as_go').addEventListener('click', async () => {
     const rows = PRICED.filter((r) => name && r.name.toLowerCase().includes(name) && r.price >= min);
     return json(res, { total: rows.length, rows });
   }
+
+  // The query reaches an auxiliary API, while the visible result comes from elsewhere.
+  if (p === '/echo/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('Search', searchUI(`async () => {
+      await fetch('/echo/api?q=' + encodeURIComponent(q.value));
+      render([{ id: 'row1', name: 'Marmalade Sky Widget', city: 'Manama' }]);
+    }`)));
+  }
+  if (p === '/echo/api') return json(res, { rows: [{ id: 'aux-99123', image: 'https://images.test/99123.jpg' }] });
 
   res.writeHead(404).end();
 }).listen(PORT, () => console.log(`scenario sites on http://127.0.0.1:${PORT}`));

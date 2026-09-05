@@ -164,7 +164,7 @@ try {
     { kind: 'action', action: 'input', value: 'gulf line', target: { id: 'cr_name_en' }, seq: 2 },
     { kind: 'net', method: 'GET', url: `${MOCK}/api/urlsearch?q=gulf%20line`, status: 200,
       resBody: JSON.stringify({ TOTAL: 1, RECORDS: [{ CR_NO: '20775', BRANCH: '1', NAME_EN: 'Gulf Line Logistics', NAME_AR: 'الخط الخليجي', STATUS: 'DELETED', TYPE: 'WLL' }] }), seq: 3 },
-    { kind: 'action', action: 'mark', text: 'CR No. Commercial Name (EN) Status', seq: 4 },
+    { kind: 'action', action: 'mark', text: 'CR No. Commercial Name (EN) Status', target: { tag: 'th' }, seq: 4 },
     { kind: 'action', action: 'mark', text: '20775-1 Gulf Line Logistics DELETED', seq: 5 },
     { kind: 'session_stop', seq: 6 },
   ]});

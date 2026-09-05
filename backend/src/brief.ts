@@ -304,7 +304,7 @@ ${ev.a.outcome ? `It chose ${ev.a.outcome.method} ${ev.a.outcome.url} as the out
 
 ### The automation this session already has
 
-${spec ? describeExisting(spec, scriptStep ? getScript(ev.id, scriptStep.file) : undefined) : `None: the deterministic analyser refused. Notes: ${ev.a.notes.join(' ') || 'none'}`}
+${spec ? describeExisting(spec, scriptStep ? getScript(ev.id, scriptStep.file) : undefined) : ev.meta.refusal ? `None: refused, ${ev.meta.refusal.reason}` : `None: the deterministic analyser refused. Notes: ${ev.a.notes.join(' ') || 'none'}`}
 
 ### What a plain HTTP fetch gets today
 

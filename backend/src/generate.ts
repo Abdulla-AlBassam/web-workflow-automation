@@ -3,10 +3,11 @@ import { requestHeaders } from './probe.js';
 
 // Bumped whenever the generator learns something new (e.g. pagination), so
 // saved specs from an older generator are refreshed before use.
-export const SPEC_VERSION = 17;
+export const SPEC_VERSION = 18;
 
 export type Spec = {
   version: number;
+  verified?: { status: 'verified' | 'unverified'; note: string };
   name: string;
   origin: string;
   language: string;

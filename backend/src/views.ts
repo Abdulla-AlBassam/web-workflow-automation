@@ -367,8 +367,8 @@ export function renderDetail(meta: Meta, st: string, a: Analysis, events: Record
 
   const specCards = spec ? renderSpec(spec, meta.session, a.marks.length, script, st === 'complete') : `<div class="card">
     <div class="card-head"><h2>Automation</h2>${pill('i', ABOUT_OFF_THE_BAT, 'What this tool builds on its own')}</div>
-    <p class="note" style="margin-top:10px">No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}</p>
-    ${st === 'complete' ? `<p class="sub" style="margin-top:10px">The deterministic analyser found no direct call to promote. <a href="#effort">Maximum Effort Mode</a> below reads the pages you saw and works out how to reach the result you want.</p>` : ''}
+    <p class="note" style="margin-top:10px">${meta.refusal ? esc(meta.refusal.reason) : `No automation could be generated from this recording${a.notes.length ? `: ${esc(a.notes.join(' '))}` : '.'}`}</p>
+    ${st === 'complete' ? `<p class="sub" style="margin-top:10px">The recording does not support a direct automation. <a href="#effort">Maximum Effort Mode</a> below reads the pages you saw and works out how to reach the result you want.</p>` : ''}
   </div>`;
   const effortCard = st === 'complete' ? renderEffort(meta, log, !!spec) : '';
 
@@ -503,6 +503,9 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
       ? `<span class="chip">${reasoned.length} browser step${reasoned.length === 1 ? '' : 's'}</span>`
       : '<span class="chip chip-ok">direct requests</span>');
   }
+  if (!spec.repaired && spec.verified) chips.push(spec.verified.status === 'verified'
+    ? '<span class="chip chip-ok">matches what you saw</span>'
+    : '<span class="chip chip-warn">unverified</span>');
   if (spec.repaired) chips.push(`<span class="chip">${spec.repaired.mode === 'import' ? 'external model' : spec.repaired.mode === 'effort' ? 'maximum effort' : spec.repaired.mode === 'refine' ? 'LLM refined' : 'LLM built'}</span>`);
   if (scriptStep?.robots?.length) chips.push('<span class="chip chip-warn">robots.txt</span>');
   // A script's rows were checked against the marks when it was accepted;
@@ -514,6 +517,7 @@ function renderSpec(spec: any, session: string, marksCount = 0, script?: string,
   // "?": clarifications this particular automation generated. A script's
   // reason is its summary, already in the provenance note.
   const clarifications: string[] = [];
+  if (!spec.repaired && spec.verified) clarifications.push(`<p>${esc(spec.verified.note)}</p>`);
   for (const s of reasoned) if (s.type !== 'script') clarifications.push(`<p>${esc(s.reason)}</p>`);
   for (const r of scriptStep?.robots ?? []) clarifications.push(`<p>${esc(r)}</p>`);
   if (marksCount && !unmatched) clarifications.push('<p>Your marked text was not found in any captured API response (it may be rendered server-side), so results show all fields instead.</p>');

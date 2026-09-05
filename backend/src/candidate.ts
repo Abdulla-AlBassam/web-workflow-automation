@@ -55,6 +55,7 @@ export type Evidence = {
   clicked: string[];
   snapshots: Ev[];
   hay: string;
+  textHay: string;
   firstPage?: string;
 };
 
@@ -96,6 +97,7 @@ export function loadEvidence(id: string): Evidence | { error: string } {
     clicked: evidenceStrings(events, a),
     snapshots: events.filter((e) => e.kind === 'snapshot'),
     hay: snapshotHaystack(events),
+    textHay: snapshotHaystack(events, true),
     firstPage: events.find((e) => e.kind === 'page' && typeof e.url === 'string')?.url as string | undefined,
   };
 }
@@ -103,12 +105,12 @@ export function loadEvidence(id: string): Evidence | { error: string } {
 // Newest first: the page the operator ended on is where the rows come from,
 // and a long recording of heavy pages would otherwise spend the whole budget
 // before reaching it and reject a script for showing what they saw.
-function snapshotHaystack(events: Ev[]): string {
+function snapshotHaystack(events: Ev[], textOnly = false): string {
   let out = '';
   for (let i = events.length - 1; i >= 0 && out.length < EVIDENCE_CHARS; i--) {
     const e = events[i];
     if (e.kind !== 'snapshot') continue;
-    out += ' ' + markKey(String(e.text ?? '')) + ' ' + markKey(String(e.html ?? ''));
+    out += ' ' + markKey(String(e.text ?? '')) + (textOnly ? '' : ' ' + markKey(String(e.html ?? '')));
   }
   return out.slice(0, EVIDENCE_CHARS);
 }
@@ -127,6 +129,45 @@ function rowsSeen(rows: Record<string, unknown>[], hay: string): number {
     if (hit) n++;
   }
   return n;
+}
+
+export type SpecVerdict = NonNullable<Spec['verified']> | { status: 'refused'; reason: string };
+
+// Offline evidence only: a query echoed by an auxiliary call is not proof
+// that its rows are the results. HTML attributes are not visible text either.
+export function verifySpec(spec: Spec, ev: Evidence): SpecVerdict {
+  if (spec.steps.find((s) => s.id === spec.outcome.fromStep)?.type === 'browser-extract') {
+    return { status: 'unverified', note: 'The outcome is read from page elements on each run; no recorded response contains those rows.' };
+  }
+  const call = ev.a.chain?.call ?? ev.a.outcome;
+  if (!call) return { status: 'unverified', note: 'No recorded outcome response is available to check.' };
+  let body: unknown;
+  try { body = JSON.parse(call.resBody ?? ''); } catch { body = undefined; }
+  const path = spec.outcome.extract.records;
+  const value = path === undefined ? body : path.split('.').reduce<unknown>((v, k) =>
+    v && typeof v === 'object' ? (v as Record<string, unknown>)[k] : undefined, body);
+  const rows = Array.isArray(value) ? value : value && typeof value === 'object' ? [value] : [];
+  const refuse = (why: string): SpecVerdict => ({
+    status: 'refused',
+    reason: `${call.method} ${call.url} returns ${call.resultShape ?? `${rows.length} records`}. ${why} Nothing was built.`,
+  });
+  if (Array.isArray(value) && !rows.length) return { status: 'unverified', note: 'The recorded search returned no rows to check.' };
+  if (ev.marks.length) {
+    const missing = ev.marks.filter((m) => !rows.some((r) => objectHasMark(r, m)));
+    if (missing.length) return refuse(`${ev.marks.length - missing.length} of ${ev.marks.length} marked selections located; missing: ${missing.map(shortMark).join(', ')}.`);
+    return { status: 'verified', note: `All ${ev.marks.length} marked selections located.${headerNote(ev.headerMarks)}` };
+  }
+  const typed = new Set(ev.typed.map((p) => markKey(p.value)));
+  const visible = rows.map((r) => Object.fromEntries(Object.entries(r ?? {}).filter(([, value]) =>
+    (typeof value === 'string' || typeof value === 'number') && !typed.has(markKey(String(value))))));
+  const seen = rowsSeen(visible, ev.textHay);
+  if (seen) return { status: 'verified', note: `${seen} of ${Math.min(rows.length, 200)} rows carry text you saw.` };
+  const clicked = ev.clicked.filter((s) => s.length >= 4 && !typed.has(s));
+  if (visible.some((r) => clicked.some((s) => rowText(r).includes(s)))) {
+    return { status: 'verified', note: 'The rows carry a result you clicked.' };
+  }
+  if (!ev.snapshots.length && !clicked.length) return { status: 'unverified', note: 'This recording has no page snapshots or clicked results to check.' };
+  return refuse('None of its rows carries anything you saw on the page.');
 }
 
 export async function checkCandidate(c: Candidate, ev: Evidence, readToken: ReadToken): Promise<Verdict> {
@@ -224,7 +265,9 @@ export function saveCandidate(ev: Evidence, c: Candidate, run: ScriptOk, by: { m
     repaired: { at: new Date().toISOString(), model: by.model, diagnosis: c.summary, summary: c.summary, mode: by.mode, ...(goal ? { feedback: goal } : {}) },
   };
   saveSpec(ev.id, spec);
-  if (!ev.meta.name && c.title) { ev.meta.name = c.title.slice(0, 80); saveMeta(ev.meta); }
+  delete ev.meta.refusal;
+  if (!ev.meta.name && c.title) ev.meta.name = c.title.slice(0, 80);
+  saveMeta(ev.meta);
   return { spec, columns };
 }
 

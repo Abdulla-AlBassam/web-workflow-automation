@@ -39,3 +39,8 @@ We write vanilla HTML/CSS (no component library, the surfaces are small). beauti
 - Focus: 2px white-alpha `focus-visible` ring. Hit areas >= 34px visual.
 - Contrast >= 4.5:1 for text. Icons are inline SVG, `currentColor`, one stroke weight (1.4).
 - `prefers-reduced-motion` freezes every animation.
+
+Deterministic evidence: the Automation card shows a green "matches what you
+saw" chip or an amber "unverified" chip; the "?" explains the verdict.
+A refusal shows the recorded call and the reason, omits Run, and opens
+Maximum Effort Mode. The Automation "i" remains available on both cards.

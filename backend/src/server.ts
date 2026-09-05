@@ -1,10 +1,10 @@
 import Fastify, { type FastifyReply } from 'fastify';
 import { existsSync, readFileSync } from 'node:fs';
-import { appendEvents, appendLog, createSession, getMeta, getScript, getSpec, listSessions, readEvents, readLog, saveBrief, saveMeta, saveSpec, status, type Meta } from './store.js';
+import { appendEvents, appendLog, createSession, deleteSpec, getMeta, getScript, getSpec, listSessions, readEvents, readLog, saveBrief, saveMeta, saveSpec, status, type Meta } from './store.js';
 import { repairSession } from './repair.js';
 import { Inbox, maxEffort } from './effort.js';
 import { buildBrief, DEFAULT_BUDGET } from './brief.js';
-import { checkCandidate, loadEvidence, parseCandidate, saveCandidate } from './candidate.js';
+import { checkCandidate, loadEvidence, parseCandidate, saveCandidate, verifySpec } from './candidate.js';
 import { parseEnv } from './env.js';
 
 // Local secrets (ANTHROPIC_API_KEY for the repair assistant) live in the
@@ -17,7 +17,7 @@ if (existsSync(envFile)) {
 }
 import { sanitise } from './redact.js';
 import { analyse } from './analyse.js';
-import { SPEC_VERSION, toSpec } from './generate.js';
+import { SPEC_VERSION, toSpec, type Spec } from './generate.js';
 import { probeAuth } from './probe.js';
 import { renderDetail, renderList } from './views.js';
 import { run, type RunDeps } from '../../runner/src/run.js';
@@ -106,14 +106,28 @@ app.post('/api/sessions/:id/stop', async (req, reply) => {
 });
 
 async function autoSpec(id: string) {
-  const a = loadAnalysis(id);
-  if (!a?.outcome) return undefined;
+  const saved = getSpec(id) as Spec | undefined;
+  if (saved?.repaired) return saved;
+  const ev = loadEvidence(id);
+  if ('error' in ev) return undefined;
+  const a = ev.a;
+  if (!a.outcome) return undefined;
   const page = readEvents(id).find((e) => e.kind === 'page' && typeof e.url === 'string');
   const loadUrl = (page?.url as string) ?? a.outcome.url;
   // The auth probe targets the call the run actually depends on: the chained
   // detail call when there is one, the search call otherwise.
   const probeStatus = await probeAuth(a.chain?.call ?? a.outcome).catch(() => undefined);
   const spec = toSpec(a, { name: id, origin: new URL(loadUrl).origin, loadUrl, probeStatus });
+  const verdict = verifySpec(spec, ev);
+  if (verdict.status === 'refused') {
+    deleteSpec(id);
+    ev.meta.refusal = { reason: verdict.reason, at: Date.now(), version: SPEC_VERSION };
+    saveMeta(ev.meta);
+    return undefined;
+  }
+  spec.verified = verdict;
+  delete ev.meta.refusal;
+  saveMeta(ev.meta);
   saveSpec(id, spec);
   return spec;
 }
@@ -124,9 +138,9 @@ async function autoSpec(id: string) {
 async function freshSpec(id: string) {
   const saved = getSpec(id) as { version?: number; repaired?: unknown } | undefined;
   if (saved?.repaired) return saved;
+  if (getMeta(id)?.refusal?.version === SPEC_VERSION) return undefined;
   if (saved?.version === SPEC_VERSION) return saved;
-  const regenerated = await autoSpec(id).catch(() => undefined);
-  return regenerated ?? saved;
+  return autoSpec(id).catch(() => undefined);
 }
 
 // A finished session doubles as a reusable automation, so the operator can
@@ -180,7 +194,7 @@ app.post('/api/sessions/:id/spec', async (req, reply) => {
   if (!getMeta(id)) return reply.code(404).send({ error: 'unknown session' });
   try {
     const spec = await autoSpec(id);
-    if (!spec) return reply.code(422).send({ error: 'no parameterised outcome call identified' });
+    if (!spec) return reply.code(422).send({ error: getMeta(id)?.refusal?.reason ?? 'no parameterised outcome call identified' });
     return spec;
   } catch (e) {
     return reply.code(422).send({ error: (e as Error).message });
@@ -425,7 +439,7 @@ app.get('/session/:id', async (req, reply) => {
   const spec = await freshSpec(id) as { steps?: { type: string; file?: string }[] } | undefined;
   const scriptStep = spec?.steps?.find((s) => s.type === 'script');
   const sessions = listSessions().map((m) => ({ ...m, st: status(m) }));
-  return renderDetail(meta, status(meta), a, events, spec, scriptStep?.file ? getScript(id, scriptStep.file) : undefined, readLog(id), sessions, req.headers.host ?? '');
+  return renderDetail(getMeta(id) ?? meta, status(meta), a, events, spec, scriptStep?.file ? getScript(id, scriptStep.file) : undefined, readLog(id), sessions, req.headers.host ?? '');
 });
 
 const port = Number(process.env.PORT ?? 4823);
