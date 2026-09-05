@@ -243,7 +243,9 @@ Then the bodies: the recording in order, the last page's text and pruned
 DOM, the pages before it, anything the page pulled in through a script tag
 (fetched at export, since the recorder only saw the URL, and usually JSONP),
 and the captured calls in full with their request and response headers,
-those carrying a typed value or structured records first. The last page as a
+first-party calls ranked by text from the last page, then structured records,
+then typed values, with smaller calls first on ties; repeats keep only the
+newest body, and third-party calls follow with a 2,000-character body cap. The last page as a
 plain fetch returns it sits with the snapshots when that page is where the
 results are, and after the calls when they are not. "Full" is capped at
 4 MB, for an agent that reads files; "Chat-sized" at 600 KB, for a chat

@@ -361,18 +361,60 @@ ${fence(b, cut)}`, SCRIPT_CAP);
   }
 
   const carries = new Set(ev.a.calls.filter((c) => c.matches.length).map((c) => c.seq));
-  const worth = (e: Ev) => carries.has(Number(e.seq)) || hasRecords(tryJson(String(e.resBody ?? '')));
+  const tokens = [...new Set((String(lastSnap?.text ?? '').match(/[\p{L}\p{N}_]{4,}/gu) ?? []).map(markKey))];
+  const carriesVisible = (e: Ev) => {
+    const hay = markKey(String(e.resBody ?? ''));
+    let hits = 0;
+    for (const token of tokens) if (hay.includes(token) && ++hits >= 3) return true;
+    return false;
+  };
+  const hosts = new Set(ev.meta.hosts.map((h) => h.toLowerCase()));
+  for (const e of ev.events) if ((e.kind === 'page' || e.kind === 'nav') && typeof e.url === 'string') {
+    hosts.add(new URL(e.url).hostname);
+  }
+  const thirdParty = (e: Ev) => {
+    const host = new URL(String(e.url)).hostname;
+    return ![...hosts].some((h) => host === h || host.endsWith('.' + h));
+  };
   const size = (e: Ev) => String(e.reqBody ?? '').length + String(e.resBody ?? '').length;
-  const ordered = [...nets.filter(worth), ...nets.filter((e) => !worth(e)).sort((x, y) => size(x) - size(y))];
-  if (ordered.length) doc.fixed('### Captured calls in full\n\nCalls that carry a typed value or return structured records first, then the rest smallest first.');
-  for (const e of ordered) {
+  // Query variants are one call family. Keep the last response in full and
+  // leave sequence-number stubs so the timeline still has a destination.
+  const groups = new Map<string, Ev[]>();
+  for (const e of nets) {
+    const u = new URL(String(e.url));
+    const key = `${e.method} ${u.origin}${u.pathname}`;
+    const group = groups.get(key) ?? [];
+    group.push(e);
+    groups.set(key, group);
+  }
+  const ordered = [...groups.values()].map((group) => {
+    const e = group[group.length - 1];
+    const visible = carriesVisible(e);
+    const score = visible ? 3 : hasRecords(tryJson(String(e.resBody ?? ''))) ? 2 : carries.has(Number(e.seq)) ? 1 : 0;
+    return { e, earlier: group.slice(0, -1), visible, score, third: thirdParty(e) };
+  }).sort((x, y) => Number(x.third) - Number(y.third) || y.score - x.score || size(x.e) - size(y.e));
+  if (ordered.length) doc.fixed('### Captured calls in full\n\nFirst-party calls first: text from the last page, structured records, then typed values; ties smallest first. Repeated calls appear once in full, newest first. Third-party bodies are capped at 2,000 characters.');
+  for (const { e, earlier, visible, third } of ordered) {
     const res = String(e.resBody ?? '');
     const req = String(e.reqBody ?? '');
     const parsed = tryJson(res);
-    const head = `#### #${e.seq} ${e.method} ${e.url} → ${e.status} ${e.contentType ?? ''}${carries.has(Number(e.seq)) ? ' [carries the typed value]' : ''}${typeof e.resTruncated === 'number' ? ` [response CUT by the recorder at ${res.length} of ${e.resTruncated} chars]` : ''}`;
-    const hdr = `${e.reqHeaders && typeof e.reqHeaders === 'object' ? `request headers the page sent: ${JSON.stringify(e.reqHeaders)}\n\n` : ''}${e.resHeaders && typeof e.resHeaders === 'object' ? `response headers: ${JSON.stringify(e.resHeaders)}\n\n` : ''}`;
-    const body = `${req ? `request body (${req.length} chars):\n${fence(req)}\n\n` : ''}response body (${res.length} chars${parsed !== undefined ? `; JSON shape ${shapeOf(parsed).slice(0, 600)}` : ''}):\n${F}\n${res}`;
-    doc.add(`call #${e.seq} ${e.method} ${e.url}`, body, (b, cut) => `${head}\n\n${hdr}${b}${cut}\n${F}`);
+    const label = `call #${e.seq} ${e.method} ${e.url}`;
+    const head = `#### #${e.seq} ${e.method} ${e.url} → ${e.status} ${e.contentType ?? ''}${carries.has(Number(e.seq)) ? ' [carries the typed value]' : ''}${visible ? ' [carries text from the last page]' : ''}${third ? ' [third-party]' : ''}${typeof e.resTruncated === 'number' ? ` [response CUT by the recorder at ${res.length} of ${e.resTruncated} chars]` : ''}`;
+    if (Number(e.status) === 0 && !res) {
+      doc.add(label, '', () => `${head} — empty response, no body retained`);
+    } else {
+      const keptReq = third ? req.slice(0, 2_000) : req;
+      const keptRes = third ? res.slice(0, 2_000 - keptReq.length) : res;
+      const capped = keptReq.length + keptRes.length < req.length + res.length;
+      const capNote = capped ? `\n[CUT by the third-party body cap: ${keptReq.length + keptRes.length} of ${req.length + res.length} chars shown]` : '';
+      if (capped) doc.leftOut.push(`${label}: cut to 2,000 body chars (third-party cap)`);
+      const hdr = `${e.reqHeaders && typeof e.reqHeaders === 'object' ? `request headers the page sent: ${JSON.stringify(e.reqHeaders)}\n\n` : ''}${e.resHeaders && typeof e.resHeaders === 'object' ? `response headers: ${JSON.stringify(e.resHeaders)}\n\n` : ''}`;
+      const body = `${req ? `request body (${req.length} chars):\n${fence(keptReq)}\n\n` : ''}response body (${res.length} chars${parsed !== undefined ? `; JSON shape ${shapeOf(parsed).slice(0, 600)}` : ''}):\n${F}\n${keptRes}${capNote}`;
+      doc.add(label, body, (b, cut) => `${head}\n\n${hdr}${b}${cut}\n${F}`);
+    }
+    for (const prior of earlier) {
+      doc.add(`call #${prior.seq}`, '', () => `#### #${prior.seq} same call as #${e.seq}, ${size(prior).toLocaleString('en-GB')} chars, not repeated`);
+    }
   }
   if (!renderedLast) addLastPage();
 

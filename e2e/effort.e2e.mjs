@@ -365,6 +365,48 @@ try {
   const exported = await fetch(`${BACKEND}/session/byom`).then((r) => r.text());
   check('byom: paste box shown once a brief exists and the page scripts parse', exported.includes('<div id="import-block">') && scriptsCompile(exported) === '', scriptsCompile(exported));
 
+  // Chunk 4: first-party result evidence survives noise, repeats and beacons.
+  const rankedEvents = shopEvents();
+  const resultBody = JSON.stringify({ rows: FINAL });
+  const firstResult = { kind: 'net', method: 'GET', url: `${SITE}/api/results?q=hub&page=1`, status: 200,
+    resBody: JSON.stringify({ rows: FIRST, old: 'OLDER_RESULT_BODY' }) };
+  const lastResult = { kind: 'net', method: 'GET', url: `${SITE}/api/results?q=hub&page=2`, status: 200, resBody: resultBody };
+  const tokenNoise = { kind: 'net', method: 'GET', url: `${SITE}/api/token-noise?q=hub`, status: 200,
+    resBody: JSON.stringify({ blob: 'x'.repeat(100_000) }) };
+  const recordsOnly = { kind: 'net', method: 'GET', url: `${SITE}/api/records`, status: 200,
+    resBody: JSON.stringify({ rows: [{ name: 'Unrelated object' }] }) };
+  const beacon = { kind: 'net', method: 'POST', url: `http://localhost:${SITE_PORT}/beacon`, status: 200,
+    reqBody: 'B'.repeat(500), resBody: 'B'.repeat(8_000) };
+  const emptyBeacon = { kind: 'net', method: 'POST', url: `http://localhost:${SITE_PORT}/empty`, status: 0,
+    reqBody: 'empty-beacon-payload', resBody: '' };
+  rankedEvents.splice(-1, 0, tokenNoise, firstResult, recordsOnly, beacon, lastResult, emptyBeacon);
+  rankedEvents.forEach((e, i) => { e.seq = i; });
+  await record('ranked', rankedEvents);
+  const rankedBrief = await fetch(`${BACKEND}/api/sessions/ranked/brief?probe=0`).then((r) => r.text());
+  const rankedChat = await fetch(`${BACKEND}/api/sessions/ranked/brief?probe=0&budget=600000`).then((r) => r.text());
+  const callsBlock = (text) => text.split('### Captured calls in full')[1].split('## Left out by the budget')[0];
+  const fullCalls = callsBlock(rankedBrief);
+  const pos = (e) => fullCalls.indexOf(`#### #${e.seq} `);
+  const callSection = (text, e) => text.split(`#### #${e.seq} `)[1]?.split('\n\n#### ')[0] ?? '';
+  check('brief ranking: visible result text, records, then typed-value noise',
+    pos(lastResult) >= 0 && pos(lastResult) < pos(recordsOnly) && pos(recordsOnly) < pos(tokenNoise) &&
+    callSection(fullCalls, lastResult).includes('[carries text from the last page]') &&
+    callSection(fullCalls, tokenNoise).includes('[carries the typed value]'));
+  check('brief repeats: newest response is whole and the earlier call is a numbered stub',
+    fullCalls.includes(resultBody) &&
+    fullCalls.includes(`#### #${firstResult.seq} same call as #${lastResult.seq}, `) &&
+    !fullCalls.includes('OLDER_RESULT_BODY'));
+  const beaconSection = callSection(fullCalls, beacon);
+  check('brief third parties: after every first-party call, at most 2 KB of combined bodies',
+    pos(beacon) > pos(tokenNoise) && (beaconSection.match(/B/g) ?? []).length === 2000 &&
+    beaconSection.includes('CUT by the third-party body cap'));
+  const emptySection = callSection(fullCalls, emptyBeacon);
+  check('brief beacons: an empty status-zero response is one line with no fences',
+    emptySection.trim().split('\n').length === 1 && !emptySection.includes('````') && !emptySection.includes('empty-beacon-payload'));
+  check('brief chat budget: the result response stays whole ahead of the noise',
+    callSection(callsBlock(rankedChat), lastResult).includes(resultBody) &&
+    !callSection(callsBlock(rankedChat), lastResult).includes('CUT'));
+
   const importAnswer = (text) => fetch(`${BACKEND}/api/sessions/byom/import`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })
     .then(async (r) => ({ status: r.status, body: await r.json() }));
   const nothing = await importAnswer('I could not work it out, sorry.');
