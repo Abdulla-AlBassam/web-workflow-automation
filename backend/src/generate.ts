@@ -314,7 +314,7 @@ export function toSpec(analysis: Analysis, opts: { name: string; origin: string;
     const embeds = [...new Map(groups
       .flatMap((g) => g.matches
         .filter((m) => m.where === 'body-embedded')
-        .map((m) => [`${g.name} ${m.token}`, { token: m.token, name: g.name, value: g.value }] as const))
+        .map((m) => [`${g.name}\u0000${m.token}`, { token: m.token, name: g.name, value: g.value }] as const))
     ).values()];
     if (embeds.length) bodyTemplate = embedTemplatise(bodyTemplate, embeds);
   }
